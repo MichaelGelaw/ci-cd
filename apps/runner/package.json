@@ -7,7 +7,7 @@
     "start": "tsx src/main.ts"
   },
   "dependencies": {
-    "@mini-ci/types": "*",
+    "@mini-ci/types": "workspace:*",
     "yaml": "^2.7.0"
   }
 }

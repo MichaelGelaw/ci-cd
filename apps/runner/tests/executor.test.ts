@@ -119,7 +119,7 @@ describe('executeWorkflow', () => {
     const workflow: WorkflowDefinition = {
       name: 'test',
       steps: [
-        { run: 'ping -n 30 127.0.0.1', timeout_seconds: 1 },
+        { run: 'sleep 30', timeout_seconds: 1 },
       ],
     };
 
