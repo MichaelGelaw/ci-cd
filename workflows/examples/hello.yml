@@ -1,0 +1,6 @@
+name: hello
+
+steps:
+  - run: echo "hello world"
+  - run: python --version
+  - run: echo "done"

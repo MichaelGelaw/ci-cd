@@ -1,0 +1,7 @@
+name: timeout-test
+
+steps:
+  - name: slow step
+    run: ping -n 30 127.0.0.1
+    timeout_seconds: 3
+  - run: echo "after timeout"

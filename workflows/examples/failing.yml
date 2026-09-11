@@ -1,0 +1,6 @@
+name: failing-workflow
+
+steps:
+  - run: echo "starting"
+  - run: exit 1
+  - run: echo "this should be skipped"
