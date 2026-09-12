@@ -12,8 +12,15 @@ import {
   subscribeJobLogs,
 } from '../../../lib/api';
 
-export default function JobDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  const resolvedParams = use(params);
+export default function JobDetailPage({
+  params,
+}: {
+  params: { id: string } | Promise<{ id: string }>;
+}) {
+  const resolvedParams =
+    params instanceof Promise || typeof (params as unknown as { then?: unknown })?.then === 'function'
+      ? use(params as Promise<{ id: string }>)
+      : params;
   const jobId = resolvedParams.id;
 
   const [job, setJob] = useState<JobRecord | null>(null);
