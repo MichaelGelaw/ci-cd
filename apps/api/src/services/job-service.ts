@@ -28,7 +28,7 @@ import type {
   RecoverJobOptions,
   RecoverJobResult,
 } from '@mini-ci/db';
-import { enqueueJob } from '@mini-ci/queue';
+import { enqueueJob, publishJobCancellation } from '@mini-ci/queue';
 
 
 
@@ -36,15 +36,65 @@ export async function getJobDetails(jobId: string): Promise<JobRecord | null> {
   return getJob(jobId);
 }
 
-export async function cancelJob(jobId: string): Promise<JobRecord> {
+export async function cancelJob(
+  jobId: string,
+  reason: string = 'Cancelled by user request via API',
+): Promise<JobRecord> {
   const existing = await getJob(jobId);
   if (!existing) {
     throw new Error(`Job ${jobId} not found`);
   }
 
-  return updateJobStatus(jobId, 'cancelled', {
-    error: 'Cancelled by user request via API',
+  // If already terminal, return existing
+  if (['succeeded', 'failed', 'cancelled', 'timed_out'].includes(existing.status)) {
+    return existing;
+  }
+
+  // Publish cancellation signal to Redis channel and flag
+  try {
+    await publishJobCancellation(jobId, reason);
+  } catch {
+    // Best effort
+  }
+
+  const finishedAt = new Date();
+  const cancelledJob = await updateJobStatus(jobId, 'cancelled', {
+    error: reason,
+    finishedAt,
+    leaseToken: null,
+    leaseExpiresAt: null,
   });
+
+  try {
+    await recordJobAttempt({
+      jobId: cancelledJob.id,
+      attemptNumber: cancelledJob.attempt,
+      status: 'cancelled',
+      error: reason,
+      startedAt: cancelledJob.started_at ?? undefined,
+      finishedAt,
+    });
+  } catch {
+    // Best-effort attempt recording
+  }
+
+  // Check if all sibling jobs are now terminal
+  const siblingJobs = await getJobsByWorkflowRun(cancelledJob.workflow_run_id);
+  const allTerminal = siblingJobs.every((j) =>
+    ['succeeded', 'failed', 'cancelled', 'timed_out'].includes(j.status),
+  );
+
+  if (allTerminal) {
+    const totalDuration = siblingJobs.reduce((acc, j) => acc + (j.duration_ms ?? 0), 0);
+    await updateWorkflowRun(cancelledJob.workflow_run_id, {
+      status: 'failed',
+      finished_at: new Date(),
+      duration_ms: totalDuration,
+      error: 'One or more jobs failed, timed out, or were cancelled',
+    });
+  }
+
+  return cancelledJob;
 }
 
 export async function updateJobExecutionStatus(

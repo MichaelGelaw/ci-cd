@@ -339,9 +339,11 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
 
   app.post('/jobs/:id/cancel', async (request, reply) => {
     const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const reason = typeof body['reason'] === 'string' ? body['reason'] : undefined;
 
     try {
-      const job = await cancelJob(id);
+      const job = await cancelJob(id, reason);
       return reply.status(200).send({ job });
     } catch (err) {
       const message = (err as Error).message;

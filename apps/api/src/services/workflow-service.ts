@@ -5,8 +5,10 @@ import {
   listWorkflowRuns,
   createJob,
   getJobsByWorkflowRun,
+  cancelWorkflowRun,
 } from '@mini-ci/db';
-import { enqueueJob } from '@mini-ci/queue';
+import type { CancelWorkflowRunResult } from '@mini-ci/db';
+import { enqueueJob, publishJobCancellation } from '@mini-ci/queue';
 import { parseWorkflowContent } from './workflow-parser.js';
 
 export interface WorkflowSubmissionResult {
@@ -74,4 +76,21 @@ export async function listRuns(
   offset: number = 0,
 ): Promise<WorkflowRunRecord[]> {
   return listWorkflowRuns(limit, offset);
+}
+
+export async function cancelWorkflowRunService(
+  runId: string,
+  reason: string = 'Cancelled by user request',
+): Promise<CancelWorkflowRunResult> {
+  const result = await cancelWorkflowRun(runId, reason);
+
+  for (const job of result.cancelledJobs) {
+    try {
+      await publishJobCancellation(job.id, reason);
+    } catch {
+      // Best-effort signal
+    }
+  }
+
+  return result;
 }

@@ -8,6 +8,7 @@ import {
   publishLogChunk,
   publishLogEnd,
   clearBufferedLogs,
+  isJobCancelled,
 } from '@mini-ci/queue';
 import { buildServer } from '../src/server.js';
 
@@ -1079,6 +1080,107 @@ steps:
       expect(streamRes.body).toContain('"event":"end"');
 
       await clearBufferedLogs(jobId);
+    });
+  });
+
+  describe('Cancellation API', () => {
+    it('POST /jobs/:id/cancel marks job as cancelled and sets Redis cancellation flag', async () => {
+      const submitRes = await app.inject({
+        method: 'POST',
+        url: '/workflows/runs',
+        payload: {
+          name: 'job-cancel-test',
+          steps: [{ name: 'long-step', run: 'sleep 30' }],
+        },
+      });
+
+      const { jobs } = submitRes.json();
+      const jobId = jobs[0].id;
+
+      // Assign and set running
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/status`,
+        payload: { status: 'assigned', worker_id: 'cancel-worker' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/status`,
+        payload: { status: 'running', worker_id: 'cancel-worker' },
+      });
+
+      // Cancel the job
+      const cancelRes = await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/cancel`,
+        payload: { reason: 'User requested abort' },
+      });
+
+      expect(cancelRes.statusCode).toBe(200);
+      const cancelBody = cancelRes.json();
+      expect(cancelBody.job.status).toBe('cancelled');
+      expect(cancelBody.job.error).toBe('User requested abort');
+
+      // Redis flag should be set
+      const isCancelled = await isJobCancelled(jobId);
+      expect(isCancelled).toBe(true);
+
+      // Attempts should have cancelled record
+      const attemptsRes = await app.inject({
+        method: 'GET',
+        url: `/jobs/${jobId}/attempts`,
+      });
+      expect(attemptsRes.statusCode).toBe(200);
+      const attempts = attemptsRes.json().attempts;
+      expect(attempts.some((a: any) => a.status === 'cancelled')).toBe(true);
+    });
+
+    it('POST /workflow-runs/:id/cancel cancels workflow run and all active jobs', async () => {
+      const submitRes = await app.inject({
+        method: 'POST',
+        url: '/workflows/runs',
+        payload: {
+          name: 'wf-cancel-test',
+          steps: [
+            { name: 'step-1', run: 'sleep 30' },
+            { name: 'step-2', run: 'sleep 30' },
+          ],
+        },
+      });
+
+      const { run, jobs } = submitRes.json();
+      const job1 = jobs[0].id;
+      const job2 = jobs[1].id;
+
+      // Assign first job to a worker
+      await assignJobToWorker(job1, 'worker-1', 60);
+
+      // Cancel the entire workflow run
+      const cancelRes = await app.inject({
+        method: 'POST',
+        url: `/workflow-runs/${run.id}/cancel`,
+        payload: { reason: 'Abort pipeline immediately' },
+      });
+
+      expect(cancelRes.statusCode).toBe(200);
+      const cancelBody = cancelRes.json();
+      expect(cancelBody.workflowRun.status).toBe('cancelled');
+      expect(cancelBody.workflowRun.error).toBe('Abort pipeline immediately');
+      expect(cancelBody.cancelledJobs).toHaveLength(2);
+
+      // Redis flag should be set for both jobs
+      expect(await isJobCancelled(job1)).toBe(true);
+      expect(await isJobCancelled(job2)).toBe(true);
+
+      // Verify GET /workflow-runs/:id returns cancelled run and jobs
+      const getRes = await app.inject({
+        method: 'GET',
+        url: `/workflow-runs/${run.id}`,
+      });
+      expect(getRes.statusCode).toBe(200);
+      const getBody = getRes.json();
+      expect(getBody.run.status).toBe('cancelled');
+      expect(getBody.jobs.every((j: any) => j.status === 'cancelled')).toBe(true);
     });
   });
 });

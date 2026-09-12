@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type { WorkflowDefinition } from '@mini-ci/types';
-import { submitWorkflow, getRunDetails, listRuns } from '../services/workflow-service.js';
+import { submitWorkflow, getRunDetails, listRuns, cancelWorkflowRunService } from '../services/workflow-service.js';
 
 export const workflowRoutes: FastifyPluginAsync = async (app) => {
   app.post('/workflows/runs', async (request, reply) => {
@@ -69,5 +69,37 @@ export const workflowRoutes: FastifyPluginAsync = async (app) => {
     }
 
     return reply.status(200).send(details);
+  });
+
+  app.post('/workflow-runs/:id/cancel', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const reason = typeof body['reason'] === 'string' ? body['reason'] : undefined;
+
+    try {
+      const result = await cancelWorkflowRunService(id, reason);
+      return reply.status(200).send({
+        run: result.run,
+        workflowRun: result.run,
+        cancelledJobs: result.cancelledJobs,
+      });
+    } catch (err) {
+      const message = (err as Error).message;
+      if (message.includes('not found')) {
+        return reply.status(404).send({
+          error: {
+            message,
+            code: 'NOT_FOUND',
+          },
+        });
+      }
+
+      return reply.status(500).send({
+        error: {
+          message,
+          code: 'INTERNAL_ERROR',
+        },
+      });
+    }
   });
 };
