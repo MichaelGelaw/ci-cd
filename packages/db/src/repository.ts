@@ -7,6 +7,9 @@ import type {
   WorkerRecord,
   WorkerStatus,
   RetryPolicy,
+  ArtifactRecord,
+  CreateArtifactParams,
+  ArtifactConfig,
 } from '@mini-ci/types';
 import { randomUUID } from 'node:crypto';
 import { getPool } from './connection.js';
@@ -158,6 +161,7 @@ export async function createJob(params: {
   maxAttempts?: number;
   status?: JobStatus;
   retryPolicy?: RetryPolicy;
+  artifacts?: string[] | ArtifactConfig | null;
 }): Promise<JobRecord> {
   const pool = getPool();
   const retryPolicy = params.retryPolicy ?? {};
@@ -174,9 +178,10 @@ export async function createJob(params: {
       priority,
       max_attempts,
       status,
-      retry_policy
+      retry_policy,
+      artifacts
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
     RETURNING
       id,
       workflow_run_id,
@@ -201,6 +206,7 @@ export async function createJob(params: {
       lease_duration_seconds,
       retry_policy,
       next_retry_at::text,
+      artifacts,
       created_at::text;
     `,
     [
@@ -213,6 +219,7 @@ export async function createJob(params: {
       maxAttempts,
       params.status ?? 'created',
       JSON.stringify(retryPolicy),
+      params.artifacts ? JSON.stringify(params.artifacts) : null,
     ],
   );
 
@@ -247,6 +254,7 @@ export async function getJob(id: string): Promise<JobRecord | null> {
       lease_duration_seconds,
       retry_policy,
       next_retry_at::text,
+      artifacts,
       created_at::text
     FROM jobs
     WHERE id = $1;
@@ -284,6 +292,7 @@ export async function getJobsByWorkflowRun(workflowRunId: string): Promise<JobRe
       lease_duration_seconds,
       retry_policy,
       next_retry_at::text,
+      artifacts,
       created_at::text
     FROM jobs
     WHERE workflow_run_id = $1
@@ -1760,6 +1769,134 @@ export async function cancelWorkflowRun(
   } finally {
     client.release();
   }
+}
+
+// -- Artifact repository functions (Milestone 15) ----------------------------
+
+export async function createArtifact(params: CreateArtifactParams): Promise<ArtifactRecord> {
+  const pool = getPool();
+  const { rows } = await pool.query<ArtifactRecord>(
+    `
+    INSERT INTO artifacts (
+      job_id,
+      workflow_run_id,
+      name,
+      path,
+      size_bytes,
+      mime_type,
+      storage_path,
+      checksum
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    RETURNING
+      id,
+      job_id,
+      workflow_run_id,
+      name,
+      path,
+      size_bytes,
+      mime_type,
+      storage_path,
+      checksum,
+      created_at::text;
+    `,
+    [
+      params.jobId,
+      params.workflowRunId,
+      params.name,
+      params.path,
+      params.sizeBytes,
+      params.mimeType ?? null,
+      params.storagePath,
+      params.checksum ?? null,
+    ],
+  );
+
+  return rows[0]!;
+}
+
+export async function getArtifact(id: string): Promise<ArtifactRecord | null> {
+  const pool = getPool();
+  const { rows } = await pool.query<ArtifactRecord>(
+    `
+    SELECT
+      id,
+      job_id,
+      workflow_run_id,
+      name,
+      path,
+      size_bytes,
+      mime_type,
+      storage_path,
+      checksum,
+      created_at::text
+    FROM artifacts
+    WHERE id = $1;
+    `,
+    [id],
+  );
+
+  return rows[0] ?? null;
+}
+
+export async function getArtifactsByJob(jobId: string): Promise<ArtifactRecord[]> {
+  const pool = getPool();
+  const { rows } = await pool.query<ArtifactRecord>(
+    `
+    SELECT
+      id,
+      job_id,
+      workflow_run_id,
+      name,
+      path,
+      size_bytes,
+      mime_type,
+      storage_path,
+      checksum,
+      created_at::text
+    FROM artifacts
+    WHERE job_id = $1
+    ORDER BY created_at ASC;
+    `,
+    [jobId],
+  );
+
+  return rows;
+}
+
+export async function getArtifactsByWorkflowRun(workflowRunId: string): Promise<ArtifactRecord[]> {
+  const pool = getPool();
+  const { rows } = await pool.query<ArtifactRecord>(
+    `
+    SELECT
+      id,
+      job_id,
+      workflow_run_id,
+      name,
+      path,
+      size_bytes,
+      mime_type,
+      storage_path,
+      checksum,
+      created_at::text
+    FROM artifacts
+    WHERE workflow_run_id = $1
+    ORDER BY created_at ASC;
+    `,
+    [workflowRunId],
+  );
+
+  return rows;
+}
+
+export async function deleteArtifact(id: string): Promise<boolean> {
+  const pool = getPool();
+  const { rowCount } = await pool.query(
+    'DELETE FROM artifacts WHERE id = $1;',
+    [id],
+  );
+
+  return (rowCount ?? 0) > 0;
 }
 
 

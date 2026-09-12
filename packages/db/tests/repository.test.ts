@@ -31,6 +31,11 @@ import {
   recoverJob,
   recoverStaleJobs,
   cancelWorkflowRun,
+  createArtifact,
+  getArtifact,
+  getArtifactsByJob,
+  getArtifactsByWorkflowRun,
+  deleteArtifact,
   getPool,
 } from '../src/index.js';
 
@@ -582,6 +587,78 @@ describe('Database Repository', () => {
     // Verify succeeded job remained succeeded
     const checkSuccess = await getJob(jobSuccess.id);
     expect(checkSuccess?.status).toBe('succeeded');
+  });
+
+  it('manages artifact persistence and queries by job and workflow run', async () => {
+    const run = await createWorkflowRun('artifact-test-workflow', 'running');
+    const job = await createJob({
+      workflowRunId: run.id,
+      name: 'build-app',
+      command: 'npm run build',
+      artifacts: { name: 'dist', paths: ['dist/**'] },
+    });
+
+    // Verify job was created with configured artifacts
+    expect(job.artifacts).toEqual({ name: 'dist', paths: ['dist/**'] });
+    const fetchedJob = await getJob(job.id);
+    expect(fetchedJob?.artifacts).toEqual({ name: 'dist', paths: ['dist/**'] });
+
+    // 1. Create artifact
+    const artifact1 = await createArtifact({
+      jobId: job.id,
+      workflowRunId: run.id,
+      name: 'build.tar.gz',
+      path: 'dist/build.tar.gz',
+      sizeBytes: 10240,
+      mimeType: 'application/gzip',
+      storagePath: '/data/artifacts/run-1/build.tar.gz',
+      checksum: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    });
+
+    expect(artifact1.id).toBeTruthy();
+    expect(artifact1.name).toBe('build.tar.gz');
+    expect(artifact1.path).toBe('dist/build.tar.gz');
+    expect(Number(artifact1.size_bytes)).toBe(10240);
+    expect(artifact1.mime_type).toBe('application/gzip');
+    expect(artifact1.storage_path).toBe('/data/artifacts/run-1/build.tar.gz');
+    expect(artifact1.checksum).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+
+    // 2. Query artifact by id
+    const fetchedArtifact = await getArtifact(artifact1.id);
+    expect(fetchedArtifact).not.toBeNull();
+    expect(fetchedArtifact?.name).toBe('build.tar.gz');
+
+    // 3. Create second artifact for same job
+    const artifact2 = await createArtifact({
+      jobId: job.id,
+      workflowRunId: run.id,
+      name: 'coverage.json',
+      path: 'coverage/coverage-final.json',
+      sizeBytes: 2048,
+      mimeType: 'application/json',
+      storagePath: '/data/artifacts/run-1/coverage.json',
+    });
+
+    // 4. Query artifacts by job
+    const jobArtifacts = await getArtifactsByJob(job.id);
+    expect(jobArtifacts).toHaveLength(2);
+    expect(jobArtifacts.map((a) => a.name)).toContain('build.tar.gz');
+    expect(jobArtifacts.map((a) => a.name)).toContain('coverage.json');
+
+    // 5. Query artifacts by workflow run
+    const runArtifacts = await getArtifactsByWorkflowRun(run.id);
+    expect(runArtifacts).toHaveLength(2);
+
+    // 6. Delete artifact
+    const deleted = await deleteArtifact(artifact1.id);
+    expect(deleted).toBe(true);
+
+    const checkDeleted = await getArtifact(artifact1.id);
+    expect(checkDeleted).toBeNull();
+
+    const remaining = await getArtifactsByJob(job.id);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]!.name).toBe('coverage.json');
   });
 });
 

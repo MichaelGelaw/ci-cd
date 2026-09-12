@@ -33,6 +33,11 @@ export {
   recoverJob,
   recoverStaleJobs,
   cancelWorkflowRun,
+  createArtifact,
+  getArtifact,
+  getArtifactsByJob,
+  getArtifactsByWorkflowRun,
+  deleteArtifact,
 } from './repository.js';
 export type {
   FindRecoverableJobsOptions,
