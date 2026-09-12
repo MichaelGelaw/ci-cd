@@ -4,6 +4,7 @@ import { healthRoutes } from './routes/health.js';
 import { workflowRoutes } from './routes/workflows.js';
 import { jobRoutes } from './routes/jobs.js';
 import { workerRoutes } from './routes/workers.js';
+import { schedulerRoutes } from './routes/scheduler.js';
 
 export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
   const app = fastify(opts);
@@ -43,6 +44,7 @@ export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
   app.register(workflowRoutes);
   app.register(jobRoutes);
   app.register(workerRoutes);
+  app.register(schedulerRoutes);
 
   return app;
 }

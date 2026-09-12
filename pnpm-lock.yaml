@@ -26,6 +26,9 @@ importers:
       '@mini-ci/queue':
         specifier: workspace:*
         version: link:../../packages/queue
+      '@mini-ci/scheduler':
+        specifier: workspace:*
+        version: link:../../packages/scheduler
       '@mini-ci/types':
         specifier: workspace:*
         version: link:../../packages/types

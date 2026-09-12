@@ -486,4 +486,17 @@ steps:
       expect(notFoundHeartbeat.statusCode).toBe(404);
     });
   });
+
+  describe('Scheduler API', () => {
+    it('POST /scheduler/tick triggers a scheduling cycle', async () => {
+      const tickRes = await app.inject({
+        method: 'POST',
+        url: '/scheduler/tick',
+      });
+
+      expect(tickRes.statusCode).toBe(200);
+      const body = tickRes.json();
+      expect(Array.isArray(body.scheduled)).toBe(true);
+    });
+  });
 });
