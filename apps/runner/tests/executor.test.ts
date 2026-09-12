@@ -245,5 +245,92 @@ describe('executeWorkflow', () => {
     expect(result.steps[0]!.status).toBe('cancelled');
     expect(result.steps[0]!.error).toBe('Cancelled by user request');
   });
+
+  describe('multi-job workflow execution', () => {
+    it('executes multiple jobs in dependency order', async () => {
+      const workflow: WorkflowDefinition = {
+        name: 'multi-job-pipeline',
+        jobs: {
+          deploy: {
+            name: 'Deploy',
+            needs: ['test'],
+            run: 'echo "deploying"',
+          },
+          test: {
+            name: 'Test',
+            needs: ['build'],
+            run: 'echo "testing"',
+          },
+          build: {
+            name: 'Build',
+            run: 'echo "building"',
+          },
+        },
+      };
+
+      const result = await executeWorkflow(workflow);
+      expect(result.status).toBe('success');
+      expect(result.steps).toHaveLength(3);
+      expect(result.steps[0]!.name).toContain('Build');
+      expect(result.steps[0]!.status).toBe('success');
+      expect(result.steps[1]!.name).toContain('Test');
+      expect(result.steps[1]!.status).toBe('success');
+      expect(result.steps[2]!.name).toContain('Deploy');
+      expect(result.steps[2]!.status).toBe('success');
+    });
+
+    it('skips dependent jobs when an upstream job fails', async () => {
+      const workflow: WorkflowDefinition = {
+        name: 'failing-multi-job',
+        jobs: {
+          build: {
+            name: 'Build',
+            run: 'exit 1',
+          },
+          independent: {
+            name: 'Independent',
+            run: 'echo "still runs"',
+          },
+          deploy: {
+            name: 'Deploy',
+            needs: ['build'],
+            run: 'echo "should be skipped"',
+          },
+        },
+      };
+
+      const result = await executeWorkflow(workflow);
+      expect(result.status).toBe('failed');
+
+      const buildStep = result.steps.find((s) => s.name.includes('Build'));
+      const indepStep = result.steps.find((s) => s.name.includes('Independent'));
+      const deployStep = result.steps.find((s) => s.name.includes('Deploy'));
+
+      expect(buildStep?.status).toBe('failed');
+      expect(indepStep?.status).toBe('success');
+      expect(deployStep?.status).toBe('skipped');
+    });
+
+    it('supports persist mode with job_key and needs', async () => {
+      const workflow: WorkflowDefinition = {
+        name: 'persisted-multi-job',
+        jobs: {
+          setup: {
+            name: 'Setup',
+            run: 'echo setup',
+          },
+          run_tests: {
+            name: 'Run Tests',
+            needs: ['setup'],
+            run: 'echo testing',
+          },
+        },
+      };
+
+      const result = await executeWorkflow(workflow, { persist: true });
+      expect(result.status).toBe('success');
+      expect(result.steps).toHaveLength(2);
+    });
+  });
 });
 
