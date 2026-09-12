@@ -660,6 +660,43 @@ describe('Database Repository', () => {
     expect(remaining).toHaveLength(1);
     expect(remaining[0]!.name).toBe('coverage.json');
   });
+
+  it('persists and retrieves job_key and needs dependencies', async () => {
+    const run = await createWorkflowRun('multi-job-pipeline');
+
+    const buildJob = await createJob({
+      workflowRunId: run.id,
+      jobKey: 'build',
+      needs: [],
+      name: 'Build Artifacts',
+      command: 'npm run build',
+    });
+
+    expect(buildJob.job_key).toBe('build');
+    expect(buildJob.needs).toEqual([]);
+
+    const testJob = await createJob({
+      workflowRunId: run.id,
+      jobKey: 'test',
+      needs: ['build'],
+      name: 'Unit Tests',
+      command: 'npm test',
+    });
+
+    expect(testJob.job_key).toBe('test');
+    expect(testJob.needs).toEqual(['build']);
+
+    const fetchedJob = await getJob(testJob.id);
+    expect(fetchedJob?.job_key).toBe('test');
+    expect(fetchedJob?.needs).toEqual(['build']);
+
+    const jobs = await getJobsByWorkflowRun(run.id);
+    expect(jobs).toHaveLength(2);
+    expect(jobs[0]?.job_key).toBe('build');
+    expect(jobs[0]?.needs).toEqual([]);
+    expect(jobs[1]?.job_key).toBe('test');
+    expect(jobs[1]?.needs).toEqual(['build']);
+  });
 });
 
 

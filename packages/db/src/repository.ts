@@ -153,6 +153,8 @@ export async function listWorkflowRuns(
 
 export async function createJob(params: {
   workflowRunId: string;
+  jobKey?: string | null;
+  needs?: string[];
   name: string;
   command: string;
   image?: string | null;
@@ -166,11 +168,14 @@ export async function createJob(params: {
   const pool = getPool();
   const retryPolicy = params.retryPolicy ?? {};
   const maxAttempts = params.retryPolicy?.max_attempts ?? params.maxAttempts ?? 1;
+  const needs = params.needs ?? [];
 
   const { rows } = await pool.query<JobRecord>(
     `
     INSERT INTO jobs (
       workflow_run_id,
+      job_key,
+      needs,
       name,
       command,
       image,
@@ -181,10 +186,12 @@ export async function createJob(params: {
       retry_policy,
       artifacts
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
     RETURNING
       id,
       workflow_run_id,
+      job_key,
+      needs,
       name,
       command,
       image,
@@ -211,6 +218,8 @@ export async function createJob(params: {
     `,
     [
       params.workflowRunId,
+      params.jobKey ?? null,
+      JSON.stringify(needs),
       params.name,
       params.command,
       params.image ?? null,
@@ -233,6 +242,8 @@ export async function getJob(id: string): Promise<JobRecord | null> {
     SELECT
       id,
       workflow_run_id,
+      job_key,
+      needs,
       name,
       command,
       image,
@@ -271,6 +282,8 @@ export async function getJobsByWorkflowRun(workflowRunId: string): Promise<JobRe
     SELECT
       id,
       workflow_run_id,
+      job_key,
+      needs,
       name,
       command,
       image,
@@ -310,6 +323,8 @@ export async function listQueuedJobs(limit: number = 100): Promise<JobRecord[]> 
     SELECT
       id,
       workflow_run_id,
+      job_key,
+      needs,
       name,
       command,
       image,
@@ -331,6 +346,7 @@ export async function listQueuedJobs(limit: number = 100): Promise<JobRecord[]> 
       lease_duration_seconds,
       retry_policy,
       next_retry_at::text,
+      artifacts,
       created_at::text
     FROM jobs
     WHERE status = 'queued'
