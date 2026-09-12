@@ -20,6 +20,7 @@ class HeartbeatSender:
         self.status_provider = status_provider
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -35,29 +36,38 @@ class HeartbeatSender:
 
     def stop(self, final_status: Optional[str] = "offline") -> None:
         if self._thread is None:
+            if final_status is not None:
+                with self._lock:
+                    try:
+                        self.api.heartbeat(self.worker_id, status=final_status)
+                    except Exception as e:
+                        logger.warning(f"Could not report final status on shutdown: {e}")
             return
+
         self._stop_event.set()
-        self._thread.join(timeout=3)
+        self._thread.join(timeout=5.0)
         self._thread = None
 
         if final_status is not None:
-            try:
-                self.api.heartbeat(self.worker_id, status=final_status)
-                logger.info(f"Reported final status {final_status} on worker shutdown")
-            except Exception as e:
-                logger.warning(f"Could not report final status on shutdown: {e}")
+            with self._lock:
+                try:
+                    self.api.heartbeat(self.worker_id, status=final_status)
+                    logger.info(f"Reported final status {final_status} on worker shutdown")
+                except Exception as e:
+                    logger.warning(f"Could not report final status on shutdown: {e}")
 
     def send_now(self, status: Optional[str] = None) -> bool:
-        current_status = status
-        if current_status is None and self.status_provider is not None:
-            current_status = self.status_provider()
+        with self._lock:
+            current_status = status
+            if current_status is None and self.status_provider is not None:
+                current_status = self.status_provider()
 
-        try:
-            self.api.heartbeat(self.worker_id, status=current_status)
-            return True
-        except Exception as e:
-            logger.warning(f"Heartbeat failed for worker {self.worker_id}: {e}")
-            return False
+            try:
+                self.api.heartbeat(self.worker_id, status=current_status)
+                return True
+            except Exception as e:
+                logger.warning(f"Heartbeat failed for worker {self.worker_id}: {e}")
+                return False
 
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():

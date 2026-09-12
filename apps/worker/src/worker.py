@@ -38,6 +38,7 @@ class Worker:
             interval_seconds=self.config.heartbeat_interval_seconds,
             status_provider=lambda: self.current_status,
         )
+        self.current_cancellation_event: Optional[threading.Event] = None
         set_log_context(worker_id=self.config.worker_id)
 
     def register(self) -> bool:
@@ -74,8 +75,15 @@ class Worker:
 
     def stop(self) -> None:
         self.running = False
+        if self.current_cancellation_event is not None:
+            try:
+                self.current_cancellation_event.set()
+            except Exception:
+                pass
         self.heartbeat_sender.api = self.api
         self.heartbeat_sender.stop(final_status="offline")
+        self.consumer.close()
+        self.api.close()
         logger.info(f"Worker {self.config.worker_id} stopped cleanly")
 
     def run_once(self, timeout_seconds: int = 1) -> bool:
@@ -142,6 +150,7 @@ class Worker:
 
         # Setup cancellation listener and event
         cancellation_event = threading.Event()
+        self.current_cancellation_event = cancellation_event
         cancel_pubsub = None
         cancel_channel = f"mini_ci:jobs:{job_id}:cancel"
         try:
@@ -175,6 +184,7 @@ class Worker:
                 lease_token=lease_token,
                 duration_seconds=int(lease_duration),
                 interval_seconds=interval,
+                on_conflict=cancellation_event.set,
             )
             renewer.start()
 
@@ -193,7 +203,9 @@ class Worker:
             })
             try:
                 self.consumer.redis.rpush(f"mini_ci:jobs:{job_id}:log_chunks", payload)
-                self.consumer.redis.expire(f"mini_ci:jobs:{job_id}:log_chunks", 86400)
+                self.consumer.redis.expire(
+                    f"mini_ci:jobs:{job_id}:log_chunks", self.config.log_ttl_seconds
+                )
                 self.consumer.redis.publish(f"mini_ci:jobs:{job_id}:logs", payload)
             except Exception as ex:
                 logger.warning(f"Failed to publish log chunk for job {job_id}: {ex}")
@@ -240,7 +252,9 @@ class Worker:
             })
             try:
                 self.consumer.redis.rpush(f"mini_ci:jobs:{job_id}:log_chunks", end_payload)
-                self.consumer.redis.expire(f"mini_ci:jobs:{job_id}:log_chunks", 86400)
+                self.consumer.redis.expire(
+                    f"mini_ci:jobs:{job_id}:log_chunks", self.config.log_ttl_seconds
+                )
                 self.consumer.redis.publish(f"mini_ci:jobs:{job_id}:logs", end_payload)
             except Exception as ex:
                 logger.warning(f"Failed to publish log end event for job {job_id}: {ex}")
@@ -282,6 +296,7 @@ class Worker:
                     else:
                         logger.error(f"Failed to report final status for job {job_id}: {e}")
         finally:
+            self.current_cancellation_event = None
             if cancel_pubsub:
                 try:
                     cancel_pubsub.unsubscribe(cancel_channel)
@@ -295,7 +310,22 @@ class Worker:
             self.consumer.acknowledge_job(job_id)
 
     def run_forever(self) -> None:
-        self.register()
+        if not self.register():
+            registered = False
+            for attempt in range(1, 4):
+                logger.warning(
+                    f"Worker {self.config.worker_id} registration failed; retrying in {attempt * 2}s..."
+                )
+                time.sleep(attempt * 2)
+                if self.register():
+                    registered = True
+                    break
+            if not registered:
+                logger.error(
+                    f"Worker {self.config.worker_id} could not register with control plane. Exiting."
+                )
+                return
+
         self.heartbeat_sender.start()
         self.running = True
         logger.info(f"Worker {self.config.worker_id} listening for jobs...")
@@ -304,6 +334,8 @@ class Worker:
                 try:
                     self.run_once(self.config.poll_timeout_seconds)
                 except Exception as e:
+                    if not self.running:
+                        break
                     logger.error(f"Error processing job: {e}")
                     time.sleep(1)
         finally:

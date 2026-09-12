@@ -12,6 +12,9 @@ class ApiClient:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
 
+    def close(self) -> None:
+        pass
+
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         resp = requests.get(f"{self.base_url}/jobs/{job_id}", timeout=10)
         if resp.status_code == 200:
@@ -140,4 +143,3 @@ class ApiClient:
             resp = requests.post(url, data=f, headers=headers, timeout=60)
             resp.raise_for_status()
             return resp.json()
-

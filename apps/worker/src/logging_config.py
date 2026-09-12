@@ -11,6 +11,13 @@ job_id_ctx: ContextVar[str] = ContextVar("job_id", default="")
 trace_id_ctx: ContextVar[str] = ContextVar("trace_id", default="")
 worker_id_ctx: ContextVar[str] = ContextVar("worker_id", default="")
 
+# Global thread-safe fallback context for background worker threads
+_global_context: Dict[str, str] = {
+    "worker_id": "",
+    "job_id": "",
+    "trace_id": "",
+}
+
 STANDARD_LOG_RECORD_ATTRS = {
     "name",
     "msg",
@@ -34,6 +41,7 @@ STANDARD_LOG_RECORD_ATTRS = {
     "process",
     "message",
     "asctime",
+    "taskName",
 }
 
 
@@ -54,9 +62,21 @@ class StructuredJsonFormatter(logging.Formatter):
             getattr(record, "worker_id", None)
             or self.default_worker_id
             or worker_id_ctx.get()
+            or _global_context.get("worker_id")
+            or ""
         )
-        job_id = getattr(record, "job_id", None) or job_id_ctx.get() or ""
-        trace_id = getattr(record, "trace_id", None) or trace_id_ctx.get() or ""
+        job_id = (
+            getattr(record, "job_id", None)
+            or job_id_ctx.get()
+            or _global_context.get("job_id")
+            or ""
+        )
+        trace_id = (
+            getattr(record, "trace_id", None)
+            or trace_id_ctx.get()
+            or _global_context.get("trace_id")
+            or ""
+        )
 
         log_data: Dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -95,17 +115,23 @@ def set_log_context(
 ) -> None:
     if job_id is not None:
         job_id_ctx.set(job_id)
+        _global_context["job_id"] = job_id
     if trace_id is not None:
         trace_id_ctx.set(trace_id)
+        _global_context["trace_id"] = trace_id
     if worker_id is not None:
         worker_id_ctx.set(worker_id)
+        _global_context["worker_id"] = worker_id
 
 
 def clear_log_context(clear_worker: bool = False) -> None:
     job_id_ctx.set("")
     trace_id_ctx.set("")
+    _global_context["job_id"] = ""
+    _global_context["trace_id"] = ""
     if clear_worker:
         worker_id_ctx.set("")
+        _global_context["worker_id"] = ""
 
 
 def configure_logging(
@@ -135,3 +161,4 @@ def configure_logging(
     root_logger.addHandler(handler)
     if worker_id:
         worker_id_ctx.set(worker_id)
+        _global_context["worker_id"] = worker_id

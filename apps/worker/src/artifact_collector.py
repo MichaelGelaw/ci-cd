@@ -8,6 +8,15 @@ from src.api_client import ApiClient
 logger = logging.getLogger("worker.artifacts")
 
 
+def _is_within_workspace(target_path: str, workspace_dir: str) -> bool:
+    try:
+        real_target = os.path.realpath(target_path)
+        real_ws = os.path.realpath(workspace_dir)
+        return os.path.commonpath([real_target, real_ws]) == real_ws
+    except Exception:
+        return False
+
+
 class ArtifactCollector:
     @staticmethod
     def collect_and_upload(
@@ -32,14 +41,27 @@ class ArtifactCollector:
         seen_files = set()
 
         for pattern in patterns:
-            search_pattern = pattern if os.path.isabs(pattern) else os.path.join(workspace_dir, pattern)
+            search_pattern = os.path.normpath(
+                pattern if os.path.isabs(pattern) else os.path.join(workspace_dir, pattern)
+            )
             matches = glob.glob(search_pattern, recursive=True)
 
             for match in matches:
+                if not _is_within_workspace(match, workspace_dir):
+                    logger.warning(
+                        f"Skipping artifact match {match}: outside workspace boundary {workspace_dir}"
+                    )
+                    continue
+
                 if os.path.isdir(match):
                     for root, _, files in os.walk(match):
                         for f in files:
                             full_path = os.path.join(root, f)
+                            if not _is_within_workspace(full_path, workspace_dir):
+                                logger.warning(
+                                    f"Skipping artifact file {full_path}: outside workspace boundary"
+                                )
+                                continue
                             if full_path in seen_files:
                                 continue
                             seen_files.add(full_path)

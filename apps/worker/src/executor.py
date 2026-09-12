@@ -1,6 +1,7 @@
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -17,7 +18,56 @@ class ExecutionResult:
     error: Optional[str] = None
 
 
+def _kill_process_safely(proc: subprocess.Popen, sig: int = signal.SIGTERM) -> None:
+    """
+    Cross-platform process termination helper.
+    Uses proc.terminate()/proc.kill() on Windows, and process group signals on POSIX.
+    """
+    if sys.platform == "win32":
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=0.5)
+            except (subprocess.TimeoutExpired, Exception):
+                proc.kill()
+        except Exception:
+            pass
+    else:
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, sig)
+        except (OSError, AttributeError, ProcessLookupError):
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+def _cleanup_container(container_name: Optional[str]) -> None:
+    """Safely kills and removes a named Docker container if present."""
+    if not container_name:
+        return
+    try:
+        subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=5)
+    except Exception:
+        pass
+    try:
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
 class CommandExecutor:
+    """
+    Executes commands either in an isolated Docker container (untrusted/default CI mode)
+    or directly via the host shell (trusted mode).
+
+    Security note:
+    - Docker container execution enforces memory, CPU, and filesystem sandboxing.
+    - Host shell execution runs with the worker process's permissions and has no
+      cgroup boundaries. Host shell mode should only be used for trusted internal workflows.
+    """
+
     @staticmethod
     def execute(
         command: str,
@@ -27,6 +77,8 @@ class CommandExecutor:
         cancellation_event: Optional[threading.Event] = None,
         container_name: Optional[str] = None,
         workspace_dir: Optional[str] = None,
+        memory_limit: str = "512m",
+        cpu_limit: str = "1.0",
     ) -> ExecutionResult:
         if workspace_dir:
             return CommandExecutor._run_in_workspace(
@@ -37,6 +89,8 @@ class CommandExecutor:
                 on_log_chunk=on_log_chunk,
                 cancellation_event=cancellation_event,
                 container_name=container_name,
+                memory_limit=memory_limit,
+                cpu_limit=cpu_limit,
             )
         else:
             with tempfile.TemporaryDirectory(prefix="mini-ci-worker-") as temp_dir:
@@ -48,6 +102,8 @@ class CommandExecutor:
                     on_log_chunk=on_log_chunk,
                     cancellation_event=cancellation_event,
                     container_name=container_name,
+                    memory_limit=memory_limit,
+                    cpu_limit=cpu_limit,
                 )
 
     @staticmethod
@@ -59,6 +115,8 @@ class CommandExecutor:
         on_log_chunk: Optional[Callable[[str, str], None]] = None,
         cancellation_event: Optional[threading.Event] = None,
         container_name: Optional[str] = None,
+        memory_limit: str = "512m",
+        cpu_limit: str = "1.0",
     ) -> ExecutionResult:
         start_time = time.time()
         if image:
@@ -71,6 +129,8 @@ class CommandExecutor:
                 on_log_chunk=on_log_chunk,
                 cancellation_event=cancellation_event,
                 container_name=container_name,
+                memory_limit=memory_limit,
+                cpu_limit=cpu_limit,
             )
         else:
             return CommandExecutor._execute_shell(
@@ -128,25 +188,13 @@ class CommandExecutor:
             time.sleep(0.05)
 
         if cancelled:
-            if container_name:
-                try:
-                    subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=5)
-                    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=5)
-                except Exception:
-                    pass
-
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except OSError:
-                pass
+            _cleanup_container(container_name)
+            _kill_process_safely(proc, signal.SIGTERM)
 
             try:
                 proc.wait(timeout=1.0)
             except (subprocess.TimeoutExpired, Exception):
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except OSError:
-                    pass
+                _kill_process_safely(proc, signal.SIGKILL)
 
             t_out.join(timeout=1.0)
             t_err.join(timeout=1.0)
@@ -160,17 +208,8 @@ class CommandExecutor:
             )
 
         if timed_out:
-            if container_name:
-                try:
-                    subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=5)
-                    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=5)
-                except Exception:
-                    pass
-
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except OSError:
-                pass
+            _cleanup_container(container_name)
+            _kill_process_safely(proc, signal.SIGKILL)
 
             t_out.join(timeout=1.0)
             t_err.join(timeout=1.0)
@@ -204,13 +243,14 @@ class CommandExecutor:
         cancellation_event: Optional[threading.Event] = None,
     ) -> ExecutionResult:
         try:
+            start_session = True if sys.platform != "win32" else False
             proc = subprocess.Popen(
                 command,
                 shell=True,
                 cwd=workspace_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                start_new_session=True,
+                start_new_session=start_session,
                 text=True,
                 bufsize=1,
             )
@@ -241,6 +281,8 @@ class CommandExecutor:
         on_log_chunk: Optional[Callable[[str, str], None]] = None,
         cancellation_event: Optional[threading.Event] = None,
         container_name: Optional[str] = None,
+        memory_limit: str = "512m",
+        cpu_limit: str = "1.0",
     ) -> ExecutionResult:
         docker_cmd = [
             "docker",
@@ -255,8 +297,8 @@ class CommandExecutor:
             f"{workspace_dir}:/workspace",
             "-w",
             "/workspace",
-            "--memory=512m",
-            "--cpus=1.0",
+            f"--memory={memory_limit}",
+            f"--cpus={cpu_limit}",
             image,
             "sh",
             "-c",
@@ -264,11 +306,12 @@ class CommandExecutor:
         ])
 
         try:
+            start_session = True if sys.platform != "win32" else False
             proc = subprocess.Popen(
                 docker_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                start_new_session=True,
+                start_new_session=start_session,
                 text=True,
                 bufsize=1,
             )

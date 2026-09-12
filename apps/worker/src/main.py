@@ -10,7 +10,6 @@ def main():
 
     def handle_signal(sig, frame):
         worker.stop()
-        sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
