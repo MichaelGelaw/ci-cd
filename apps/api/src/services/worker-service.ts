@@ -5,6 +5,8 @@ import {
   getWorker,
   listWorkers,
   touchWorkerHeartbeat,
+  reapDeadWorkers,
+  findStaleWorkers,
 } from '@mini-ci/db';
 
 export async function registerWorkerService(params: RegisterWorkerRequest): Promise<WorkerRecord> {
@@ -39,4 +41,16 @@ export async function touchWorkerHeartbeatService(
   status?: WorkerStatus,
 ): Promise<WorkerRecord> {
   return touchWorkerHeartbeat(id, status);
+}
+
+export async function reapDeadWorkersService(
+  timeoutSeconds: number = 30,
+): Promise<WorkerRecord[]> {
+  return reapDeadWorkers(timeoutSeconds);
+}
+
+export async function findStaleWorkersService(
+  timeoutSeconds: number = 30,
+): Promise<WorkerRecord[]> {
+  return findStaleWorkers(timeoutSeconds);
 }

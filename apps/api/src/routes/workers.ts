@@ -5,6 +5,8 @@ import {
   getWorkerService,
   listWorkersService,
   touchWorkerHeartbeatService,
+  reapDeadWorkersService,
+  findStaleWorkersService,
 } from '../services/worker-service.js';
 
 const VALID_WORKER_STATUSES: Set<WorkerStatus> = new Set(['ready', 'busy', 'offline', 'paused']);
@@ -109,5 +111,25 @@ export const workerRoutes: FastifyPluginAsync = async (app) => {
       }
       throw err;
     }
+  });
+
+  app.get('/workers/stale', async (request, reply) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const timeout = query['timeout_seconds']
+      ? Math.max(1, parseInt(String(query['timeout_seconds']), 10) || 30)
+      : 30;
+
+    const staleWorkers = await findStaleWorkersService(timeout);
+    return reply.status(200).send({ staleWorkers, count: staleWorkers.length });
+  });
+
+  app.post('/workers/reap', async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const rawTimeout = body['timeout_seconds'] ?? query['timeout_seconds'] ?? 30;
+    const timeout = Math.max(1, parseInt(String(rawTimeout), 10) || 30);
+
+    const reapedWorkers = await reapDeadWorkersService(timeout);
+    return reply.status(200).send({ reapedWorkers, count: reapedWorkers.length });
   });
 };

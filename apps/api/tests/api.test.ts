@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { runMigrations, closePool } from '@mini-ci/db';
+import { runMigrations, closePool, getPool } from '@mini-ci/db';
 import { closeRedis, clearQueue, getQueueLength } from '@mini-ci/queue';
 import { buildServer } from '../src/server.js';
 
@@ -484,6 +484,48 @@ steps:
         url: '/workers/missing-worker/heartbeat',
       });
       expect(notFoundHeartbeat.statusCode).toBe(404);
+    });
+
+    it('GET /workers/stale and POST /workers/reap identify and transition dead workers', async () => {
+      const deadWorkerId = `dead-worker-${Date.now()}`;
+      await app.inject({
+        method: 'POST',
+        url: '/workers/register',
+        payload: { id: deadWorkerId, name: 'stale-node', tags: ['shell'] },
+      });
+
+      // Backdate heartbeat
+      const pool = getPool();
+      await pool.query(
+        "UPDATE workers SET last_heartbeat_at = NOW() - INTERVAL '120 seconds' WHERE id = $1;",
+        [deadWorkerId],
+      );
+
+      // GET /workers/stale
+      const staleRes = await app.inject({
+        method: 'GET',
+        url: '/workers/stale?timeout_seconds=30',
+      });
+      expect(staleRes.statusCode).toBe(200);
+      const staleBody = staleRes.json();
+      expect(staleBody.staleWorkers.some((w: any) => w.id === deadWorkerId)).toBe(true);
+
+      // POST /workers/reap
+      const reapRes = await app.inject({
+        method: 'POST',
+        url: '/workers/reap',
+        payload: { timeout_seconds: 30 },
+      });
+      expect(reapRes.statusCode).toBe(200);
+      const reapBody = reapRes.json();
+      expect(reapBody.reapedWorkers.some((w: any) => w.id === deadWorkerId)).toBe(true);
+
+      // Verify worker is now offline
+      const checkRes = await app.inject({
+        method: 'GET',
+        url: `/workers/${deadWorkerId}`,
+      });
+      expect(checkRes.json().worker.status).toBe('offline');
     });
   });
 
