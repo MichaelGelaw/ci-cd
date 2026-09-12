@@ -10,4 +10,5 @@ export type {
   WorkflowRunRecord,
   JobRecord,
   JobAttemptRecord,
+  JobQueueMessage,
 } from './workflow.js';

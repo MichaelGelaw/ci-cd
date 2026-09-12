@@ -107,3 +107,13 @@ export interface JobAttemptRecord {
   finished_at: string | null;
   duration_ms: number | null;
 }
+
+// Queue message model (Milestone 5)
+
+export interface JobQueueMessage {
+  jobId: string;
+  workflowRunId: string;
+  queuedAt: string;
+  attempt: number;
+}
+
