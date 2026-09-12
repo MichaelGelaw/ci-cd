@@ -1,6 +1,7 @@
 import json
 import logging
 import platform
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -95,8 +96,15 @@ class Worker:
             return
 
         # If job is already cancelled, terminal, or retrying, acknowledge and skip
-        if job.get("status") in ("succeeded", "failed", "cancelled", "retrying"):
-            logger.info(f"Job {job_id} already in terminal or retrying state {job.get('status')}")
+        is_cancelled = False
+        try:
+            res = self.consumer.redis.exists(f"mini_ci:jobs:{job_id}:cancelled")
+            is_cancelled = bool(res == 1 or res is True)
+        except Exception:
+            pass
+
+        if is_cancelled or job.get("status") in ("succeeded", "failed", "cancelled", "retrying"):
+            logger.info(f"Job {job_id} already in terminal, retrying, or cancelled state")
             self.consumer.acknowledge_job(job_id)
             return
 
@@ -119,6 +127,29 @@ class Worker:
             self.heartbeat(status="ready")
             self.consumer.acknowledge_job(job_id)
             return
+
+        # Setup cancellation listener and event
+        cancellation_event = threading.Event()
+        cancel_pubsub = None
+        cancel_channel = f"mini_ci:jobs:{job_id}:cancel"
+        try:
+            cancel_pubsub = self.consumer.redis.pubsub()
+            cancel_pubsub.subscribe(cancel_channel)
+
+            def cancel_listener():
+                try:
+                    for msg in cancel_pubsub.listen():
+                        if msg and msg.get("type") == "message":
+                            logger.info(f"Cancellation signal received for job {job_id}")
+                            cancellation_event.set()
+                            break
+                except Exception:
+                    pass
+
+            cancel_thread = threading.Thread(target=cancel_listener, daemon=True)
+            cancel_thread.start()
+        except Exception as e:
+            logger.warning(f"Failed to subscribe to cancellation channel for job {job_id}: {e}")
 
         # Start lease renewer if job has lease
         lease_token = job.get("lease_token")
@@ -155,12 +186,15 @@ class Worker:
             except Exception as ex:
                 logger.warning(f"Failed to publish log chunk for job {job_id}: {ex}")
 
+        container_name = f"mini-ci-job-{job_id}-{attempt_num}"
         try:
             result = CommandExecutor.execute(
                 command=command,
                 image=image,
                 timeout_seconds=timeout_seconds,
                 on_log_chunk=on_log_chunk,
+                cancellation_event=cancellation_event,
+                container_name=container_name,
             )
 
             # Publish log end event
@@ -177,7 +211,16 @@ class Worker:
             except Exception as ex:
                 logger.warning(f"Failed to publish log end event for job {job_id}: {ex}")
 
-            if renewer and renewer.is_conflict():
+            cancelled_in_redis = False
+            try:
+                res = self.consumer.redis.exists(f"mini_ci:jobs:{job_id}:cancelled")
+                cancelled_in_redis = bool(res == 1 or res is True)
+            except Exception:
+                pass
+
+            if cancellation_event.is_set() or cancelled_in_redis:
+                logger.info(f"Job {job_id} was cancelled during execution; skipping status update")
+            elif renewer and renewer.is_conflict():
                 logger.error(
                     f"Worker fenced out: lease for job {job_id} was lost during execution; skipping status update"
                 )
@@ -212,6 +255,12 @@ class Worker:
                     else:
                         logger.error(f"Failed to report final status for job {job_id}: {e}")
         finally:
+            if cancel_pubsub:
+                try:
+                    cancel_pubsub.unsubscribe(cancel_channel)
+                    cancel_pubsub.close()
+                except Exception:
+                    pass
             if renewer:
                 renewer.stop()
             # Return worker to ready state and acknowledge in Redis

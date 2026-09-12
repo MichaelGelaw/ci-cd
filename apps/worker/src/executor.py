@@ -24,6 +24,8 @@ class CommandExecutor:
         image: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
         on_log_chunk: Optional[Callable[[str, str], None]] = None,
+        cancellation_event: Optional[threading.Event] = None,
+        container_name: Optional[str] = None,
     ) -> ExecutionResult:
         with tempfile.TemporaryDirectory(prefix="mini-ci-worker-") as workspace_dir:
             start_time = time.time()
@@ -35,6 +37,8 @@ class CommandExecutor:
                     timeout_seconds=timeout_seconds,
                     start_time=start_time,
                     on_log_chunk=on_log_chunk,
+                    cancellation_event=cancellation_event,
+                    container_name=container_name,
                 )
             else:
                 return CommandExecutor._execute_shell(
@@ -43,6 +47,7 @@ class CommandExecutor:
                     timeout_seconds=timeout_seconds,
                     start_time=start_time,
                     on_log_chunk=on_log_chunk,
+                    cancellation_event=cancellation_event,
                 )
 
     @staticmethod
@@ -51,6 +56,8 @@ class CommandExecutor:
         timeout_seconds: Optional[int],
         start_time: float,
         on_log_chunk: Optional[Callable[[str, str], None]] = None,
+        cancellation_event: Optional[threading.Event] = None,
+        container_name: Optional[str] = None,
     ) -> ExecutionResult:
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
@@ -74,22 +81,65 @@ class CommandExecutor:
         t_out.start()
         t_err.start()
 
-        try:
-            exit_code = proc.wait(timeout=timeout_seconds)
-            t_out.join(timeout=2.0)
-            t_err.join(timeout=2.0)
+        cancelled = False
+        timed_out = False
+
+        while proc.poll() is None:
+            if cancellation_event and cancellation_event.is_set():
+                cancelled = True
+                break
+
+            if timeout_seconds and (time.time() - start_time) > timeout_seconds:
+                timed_out = True
+                break
+
+            time.sleep(0.05)
+
+        if cancelled:
+            if container_name:
+                try:
+                    subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=5)
+                    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=5)
+                except Exception:
+                    pass
+
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except OSError:
+                pass
+
+            try:
+                proc.wait(timeout=1.0)
+            except (subprocess.TimeoutExpired, Exception):
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except OSError:
+                    pass
+
+            t_out.join(timeout=1.0)
+            t_err.join(timeout=1.0)
             duration_ms = int((time.time() - start_time) * 1000)
             return ExecutionResult(
-                exit_code=exit_code,
+                exit_code=-1,
                 stdout="".join(stdout_chunks),
                 stderr="".join(stderr_chunks),
                 duration_ms=duration_ms,
+                error="Cancelled by user request",
             )
-        except subprocess.TimeoutExpired:
+
+        if timed_out:
+            if container_name:
+                try:
+                    subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=5)
+                    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=5)
+                except Exception:
+                    pass
+
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except OSError:
                 pass
+
             t_out.join(timeout=1.0)
             t_err.join(timeout=1.0)
             duration_ms = int((time.time() - start_time) * 1000)
@@ -101,6 +151,17 @@ class CommandExecutor:
                 error=f"Step timed out after {timeout_seconds}s",
             )
 
+        exit_code = proc.returncode
+        t_out.join(timeout=2.0)
+        t_err.join(timeout=2.0)
+        duration_ms = int((time.time() - start_time) * 1000)
+        return ExecutionResult(
+            exit_code=exit_code,
+            stdout="".join(stdout_chunks),
+            stderr="".join(stderr_chunks),
+            duration_ms=duration_ms,
+        )
+
     @staticmethod
     def _execute_shell(
         command: str,
@@ -108,6 +169,7 @@ class CommandExecutor:
         timeout_seconds: Optional[int],
         start_time: float,
         on_log_chunk: Optional[Callable[[str, str], None]] = None,
+        cancellation_event: Optional[threading.Event] = None,
     ) -> ExecutionResult:
         try:
             proc = subprocess.Popen(
@@ -125,6 +187,7 @@ class CommandExecutor:
                 timeout_seconds=timeout_seconds,
                 start_time=start_time,
                 on_log_chunk=on_log_chunk,
+                cancellation_event=cancellation_event,
             )
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
@@ -144,11 +207,18 @@ class CommandExecutor:
         timeout_seconds: Optional[int],
         start_time: float,
         on_log_chunk: Optional[Callable[[str, str], None]] = None,
+        cancellation_event: Optional[threading.Event] = None,
+        container_name: Optional[str] = None,
     ) -> ExecutionResult:
         docker_cmd = [
             "docker",
             "run",
             "--rm",
+        ]
+        if container_name:
+            docker_cmd.append(f"--name={container_name}")
+
+        docker_cmd.extend([
             "-v",
             f"{workspace_dir}:/workspace",
             "-w",
@@ -159,7 +229,7 @@ class CommandExecutor:
             "sh",
             "-c",
             command,
-        ]
+        ])
 
         try:
             proc = subprocess.Popen(
@@ -175,6 +245,8 @@ class CommandExecutor:
                 timeout_seconds=timeout_seconds,
                 start_time=start_time,
                 on_log_chunk=on_log_chunk,
+                cancellation_event=cancellation_event,
+                container_name=container_name,
             )
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)

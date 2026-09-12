@@ -56,7 +56,7 @@ def test_worker_publishes_log_chunks_and_end_event():
     ]
 
     with patch("src.executor.CommandExecutor.execute") as mock_exec:
-        def fake_exec(command, image, timeout_seconds, on_log_chunk):
+        def fake_exec(command, image, timeout_seconds, on_log_chunk, *args, **kwargs):
             if on_log_chunk:
                 on_log_chunk("stdout", "Streaming log 1\n")
                 on_log_chunk("stdout", "Streaming log 2\n")
