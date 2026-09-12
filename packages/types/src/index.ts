@@ -5,4 +5,9 @@ export type {
   WorkflowStatus,
   StepResult,
   WorkflowResult,
+  JobStatus,
+  RunStatus,
+  WorkflowRunRecord,
+  JobRecord,
+  JobAttemptRecord,
 } from './workflow.js';
