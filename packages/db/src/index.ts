@@ -32,11 +32,13 @@ export {
   findRecoverableJobs,
   recoverJob,
   recoverStaleJobs,
+  cancelWorkflowRun,
 } from './repository.js';
 export type {
   FindRecoverableJobsOptions,
   RecoverJobOptions,
   RecoverJobResult,
+  CancelWorkflowRunResult,
 } from './repository.js';
 export { calculateRetryDelay, isFailureRetryable } from './retry.js';
 

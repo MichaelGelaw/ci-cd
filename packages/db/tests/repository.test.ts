@@ -30,6 +30,7 @@ import {
   findRecoverableJobs,
   recoverJob,
   recoverStaleJobs,
+  cancelWorkflowRun,
   getPool,
 } from '../src/index.js';
 
@@ -528,7 +529,62 @@ describe('Database Repository', () => {
     const batchRecovered = await recoverStaleJobs();
     expect(batchRecovered.some((r) => r.job.id === job4.id)).toBe(true);
   });
+
+  it('cancels workflow run and all active in-flight jobs atomically', async () => {
+    const run = await createWorkflowRun('cancel-run-workflow', 'running');
+
+    // 1. Succeeded job (already finished)
+    const jobSuccess = await createJob({
+      workflowRunId: run.id,
+      name: 'step-done',
+      command: 'echo 0',
+    });
+    await updateJobStatus(jobSuccess.id, 'queued');
+    await updateJobStatus(jobSuccess.id, 'assigned');
+    await updateJobStatus(jobSuccess.id, 'running');
+    await updateJobStatus(jobSuccess.id, 'succeeded', { exitCode: 0 });
+
+    // 2. Running job with lease
+    const jobRunning = await createJob({
+      workflowRunId: run.id,
+      name: 'step-running',
+      command: 'sleep 100',
+    });
+    await updateJobStatus(jobRunning.id, 'queued');
+    const assignedRunning = await assignJobToWorker(jobRunning.id, 'worker-cancel-test', 30);
+    await updateJobStatus(jobRunning.id, 'running');
+
+    // 3. Queued job
+    const jobQueued = await createJob({
+      workflowRunId: run.id,
+      name: 'step-queued',
+      command: 'echo next',
+    });
+    await updateJobStatus(jobQueued.id, 'queued');
+
+    // Cancel workflow run
+    const result = await cancelWorkflowRun(run.id, 'Aborted by user via CLI');
+    expect(result.run.status).toBe('cancelled');
+    expect(result.run.error).toBe('Aborted by user via CLI');
+    expect(result.cancelledJobs).toHaveLength(2);
+
+    // Verify running job is cancelled and lease cleared
+    const checkRunning = await getJob(jobRunning.id);
+    expect(checkRunning?.status).toBe('cancelled');
+    expect(checkRunning?.lease_token).toBeNull();
+    expect(checkRunning?.lease_expires_at).toBeNull();
+    expect(checkRunning?.error).toContain('Aborted by user via CLI');
+
+    // Verify queued job is cancelled
+    const checkQueued = await getJob(jobQueued.id);
+    expect(checkQueued?.status).toBe('cancelled');
+
+    // Verify succeeded job remained succeeded
+    const checkSuccess = await getJob(jobSuccess.id);
+    expect(checkSuccess?.status).toBe('succeeded');
+  });
 });
+
 
 
 

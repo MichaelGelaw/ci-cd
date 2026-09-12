@@ -1633,3 +1633,133 @@ export async function recoverStaleJobs(
   return results;
 }
 
+export interface CancelWorkflowRunResult {
+  run: WorkflowRunRecord;
+  cancelledJobs: JobRecord[];
+}
+
+export async function cancelWorkflowRun(
+  workflowRunId: string,
+  reason: string = 'Cancelled by user request',
+): Promise<CancelWorkflowRunResult> {
+  const pool = getPool();
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // 1. Lock workflow run
+    const { rows: runRows } = await client.query<WorkflowRunRecord>(
+      'SELECT id, workflow_name, status, started_at::text, finished_at::text, duration_ms, error, created_at::text FROM workflow_runs WHERE id = $1 FOR UPDATE;',
+      [workflowRunId],
+    );
+
+    if (runRows.length === 0) {
+      throw new Error(`Workflow run ${workflowRunId} not found`);
+    }
+
+    // 2. Cancel all non-terminal jobs
+    const { rows: cancelledJobs } = await client.query<JobRecord>(
+      `
+      UPDATE jobs
+      SET
+        status = 'cancelled',
+        error = $2,
+        finished_at = COALESCE(finished_at, NOW()),
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        next_retry_at = NULL
+      WHERE workflow_run_id = $1
+        AND status IN ('created', 'queued', 'assigned', 'running', 'retrying')
+      RETURNING
+        id,
+        workflow_run_id,
+        name,
+        command,
+        image,
+        status,
+        priority,
+        attempt,
+        max_attempts,
+        worker_id,
+        exit_code,
+        stdout,
+        stderr,
+        error,
+        timeout_seconds,
+        started_at::text,
+        finished_at::text,
+        duration_ms,
+        lease_token,
+        lease_expires_at::text,
+        lease_duration_seconds,
+        retry_policy,
+        next_retry_at::text,
+        created_at::text;
+      `,
+      [workflowRunId, reason],
+    );
+
+    // 3. Record attempt as cancelled for each job
+    for (const job of cancelledJobs) {
+      await client.query(
+        `
+        INSERT INTO job_attempts (
+          job_id,
+          attempt_number,
+          status,
+          exit_code,
+          stdout,
+          stderr,
+          error,
+          started_at,
+          finished_at,
+          duration_ms
+        )
+        VALUES ($1, $2, 'cancelled', NULL, $3, $4, $5, COALESCE($6, NOW()), NOW(), NULL)
+        ON CONFLICT (job_id, attempt_number)
+        DO UPDATE SET
+          status = 'cancelled',
+          error = EXCLUDED.error,
+          finished_at = EXCLUDED.finished_at;
+        `,
+        [job.id, job.attempt, job.stdout ?? '', job.stderr ?? '', reason, job.started_at ?? null],
+      );
+    }
+
+    // 4. Update workflow_run status to cancelled
+    const { rows: updatedRunRows } = await client.query<WorkflowRunRecord>(
+      `
+      UPDATE workflow_runs
+      SET
+        status = 'cancelled',
+        finished_at = COALESCE(finished_at, NOW()),
+        error = $2
+      WHERE id = $1
+      RETURNING
+        id,
+        workflow_name,
+        status,
+        started_at::text,
+        finished_at::text,
+        duration_ms,
+        error,
+        created_at::text;
+      `,
+      [workflowRunId, reason],
+    );
+
+    await client.query('COMMIT');
+    return {
+      run: updatedRunRows[0]!,
+      cancelledJobs,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+
