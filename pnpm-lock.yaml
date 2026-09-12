@@ -20,6 +20,9 @@ importers:
 
   apps/runner:
     dependencies:
+      '@mini-ci/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@mini-ci/types':
         specifier: workspace:*
         version: link:../../packages/types

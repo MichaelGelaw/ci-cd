@@ -144,4 +144,43 @@ describe('executeWorkflow', () => {
     expect(result.status).toBe('failed');
     expect(result.steps[0]!.status).toBe('failed');
   });
+
+  it('persists workflow runs and jobs to postgresql when persist option is enabled', async () => {
+    const { runMigrations, closePool, query } = await import('@mini-ci/db');
+    await runMigrations();
+
+    const workflow: WorkflowDefinition = {
+      name: 'persistent-workflow-test',
+      steps: [
+        { name: 'step-1', run: 'echo "hello postgres"' },
+        { name: 'step-2', run: 'echo "second step"' },
+      ],
+    };
+
+    const result = await executeWorkflow(workflow, { persist: true });
+    expect(result.status).toBe('success');
+
+    const { rows: runRows } = await query<{ id: string; status: string }>(
+      'SELECT id, status FROM workflow_runs WHERE workflow_name = $1 ORDER BY created_at DESC LIMIT 1;',
+      ['persistent-workflow-test'],
+    );
+    expect(runRows).toHaveLength(1);
+    expect(runRows[0]?.status).toBe('succeeded');
+
+    const runId = runRows[0]!.id;
+    const { rows: jobRows } = await query<{ name: string; status: string; exit_code: number }>(
+      'SELECT name, status, exit_code FROM jobs WHERE workflow_run_id = $1 ORDER BY created_at ASC;',
+      [runId],
+    );
+    expect(jobRows).toHaveLength(2);
+    expect(jobRows[0]?.name).toBe('step-1');
+    expect(jobRows[0]?.status).toBe('succeeded');
+    expect(jobRows[0]?.exit_code).toBe(0);
+
+    expect(jobRows[1]?.name).toBe('step-2');
+    expect(jobRows[1]?.status).toBe('succeeded');
+    expect(jobRows[1]?.exit_code).toBe(0);
+
+    await closePool();
+  });
 });

@@ -10,11 +10,18 @@ import type {
   StepStatus,
 } from '@mini-ci/types';
 
+import {
+  createWorkflowRun,
+  updateWorkflowRun,
+  createJob,
+  updateJobStatus,
+} from '@mini-ci/db';
 import { runStepInDocker } from './docker-runner.js';
 
 export interface ExecuteOptions {
   mode?: 'shell' | 'docker';
   shell?: string;
+  persist?: boolean;
 }
 
 interface StepOutput {
@@ -104,6 +111,30 @@ export async function executeWorkflow(
   const results: StepResult[] = [];
   let failed = false;
 
+  let dbRunId: string | null = null;
+  const dbJobIds: (string | null)[] = [];
+
+  if (options.persist) {
+    const runRecord = await createWorkflowRun(workflow.name, 'running');
+    dbRunId = runRecord.id;
+
+    for (let i = 0; i < workflow.steps.length; i++) {
+      const step = workflow.steps[i]!;
+      const stepName = step.name ?? `Step ${i + 1}`;
+      const image = step.image ?? (mode === 'docker' ? workflow.image : undefined);
+
+      const jobRecord = await createJob({
+        workflowRunId: dbRunId,
+        name: stepName,
+        command: step.run,
+        image: image ?? null,
+        timeoutSeconds: step.timeout_seconds ?? null,
+        status: 'created',
+      });
+      dbJobIds.push(jobRecord.id);
+    }
+  }
+
   // Create a temporary workspace for Docker mode.
   let workspaceDir: string | undefined;
   if (mode === 'docker') {
@@ -114,8 +145,23 @@ export async function executeWorkflow(
     for (let i = 0; i < workflow.steps.length; i++) {
       const step = workflow.steps[i]!;
       const stepName = step.name ?? `Step ${i + 1}`;
+      const dbJobId = dbJobIds[i];
 
       if (failed) {
+        if (dbJobId) {
+          // In the state machine: created -> queued -> assigned -> running -> cancelled
+          // To cleanly represent skipped jobs that never started, we transition created -> queued -> cancelled
+          // or record cancellation error directly
+          try {
+            await updateJobStatus(dbJobId, 'queued');
+            await updateJobStatus(dbJobId, 'cancelled', {
+              error: 'Skipped due to previous step failure',
+            });
+          } catch {
+            // Best-effort status update
+          }
+        }
+
         results.push({
           index: i,
           name: stepName,
@@ -133,6 +179,12 @@ export async function executeWorkflow(
 
       const stepStart = new Date();
       const timeoutMs = step.timeout_seconds ? step.timeout_seconds * 1000 : undefined;
+
+      if (dbJobId) {
+        await updateJobStatus(dbJobId, 'queued');
+        await updateJobStatus(dbJobId, 'assigned');
+        await updateJobStatus(dbJobId, 'running', { startedAt: stepStart });
+      }
 
       let result: StepOutput;
 
@@ -181,6 +233,18 @@ export async function executeWorkflow(
         stepResult.error = result.error;
       }
 
+      if (dbJobId) {
+        const targetStatus = status === 'success' ? 'succeeded' : 'failed';
+        await updateJobStatus(dbJobId, targetStatus, {
+          exitCode: result.exit_code,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          error: result.error ?? null,
+          finishedAt: stepEnd,
+          durationMs: stepResult.duration_ms,
+        });
+      }
+
       results.push(stepResult);
 
       if (status === 'failed') {
@@ -199,6 +263,16 @@ export async function executeWorkflow(
   }
 
   const workflowEnd = new Date();
+  const totalDurationMs = workflowEnd.getTime() - workflowStart.getTime();
+
+  if (dbRunId) {
+    await updateWorkflowRun(dbRunId, {
+      status: failed ? 'failed' : 'succeeded',
+      finished_at: workflowEnd,
+      duration_ms: totalDurationMs,
+      error: failed ? 'One or more steps failed' : null,
+    });
+  }
 
   return {
     workflow_name: workflow.name,
@@ -206,6 +280,6 @@ export async function executeWorkflow(
     steps: results,
     started_at: workflowStart.toISOString(),
     finished_at: workflowEnd.toISOString(),
-    duration_ms: workflowEnd.getTime() - workflowStart.getTime(),
+    duration_ms: totalDurationMs,
   };
 }

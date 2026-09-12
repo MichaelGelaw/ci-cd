@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 
+import { runMigrations, closePool } from '@mini-ci/db';
 import { parseWorkflowFile } from './parser.js';
 import { executeWorkflow } from './executor.js';
 import { printResult, printJson } from './reporter.js';
@@ -10,10 +11,11 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const jsonMode = args.includes('--json');
   const forceShell = args.includes('--shell');
+  const persist = args.includes('--persist');
   const filePath = args.find((a) => !a.startsWith('--'));
 
   if (!filePath) {
-    console.error('Usage: mini-ci <workflow.yml> [--json] [--shell]');
+    console.error('Usage: mini-ci <workflow.yml> [--json] [--shell] [--persist]');
     process.exit(1);
   }
 
@@ -31,16 +33,34 @@ async function main(): Promise<void> {
   if (forceShell) {
     options.mode = 'shell';
   }
-
-  const result = await executeWorkflow(workflow, options);
-
-  if (jsonMode) {
-    printJson(result);
-  } else {
-    printResult(result);
+  if (persist) {
+    options.persist = true;
+    try {
+      await runMigrations();
+    } catch (error) {
+      console.error(`Database migration failed: ${(error as Error).message}`);
+      process.exit(1);
+    }
   }
 
-  process.exit(result.status === 'success' ? 0 : 1);
+  let exitCode = 1;
+  try {
+    const result = await executeWorkflow(workflow, options);
+
+    if (jsonMode) {
+      printJson(result);
+    } else {
+      printResult(result);
+    }
+
+    exitCode = result.status === 'success' ? 0 : 1;
+  } finally {
+    if (persist) {
+      await closePool();
+    }
+  }
+
+  process.exit(exitCode);
 }
 
 main();
