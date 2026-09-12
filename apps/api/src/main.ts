@@ -1,4 +1,5 @@
 import { runMigrations, closePool } from '@mini-ci/db';
+import { closeRedis } from '@mini-ci/queue';
 import { buildServer } from './server.js';
 
 async function main(): Promise<void> {
@@ -16,6 +17,7 @@ async function main(): Promise<void> {
     console.log('Shutting down API server...');
     await app.close();
     await closePool();
+    await closeRedis();
     process.exit(0);
   };
 
@@ -28,6 +30,7 @@ async function main(): Promise<void> {
   } catch (err) {
     console.error(`Failed to start API server: ${(err as Error).message}`);
     await closePool();
+    await closeRedis();
     process.exit(1);
   }
 }

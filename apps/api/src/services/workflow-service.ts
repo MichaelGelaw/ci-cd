@@ -6,6 +6,7 @@ import {
   createJob,
   getJobsByWorkflowRun,
 } from '@mini-ci/db';
+import { enqueueJob } from '@mini-ci/queue';
 import { parseWorkflowContent } from './workflow-parser.js';
 
 export interface WorkflowSubmissionResult {
@@ -39,6 +40,13 @@ export async function submitWorkflow(
       image: image ?? null,
       timeoutSeconds: step.timeout_seconds ?? null,
       status: 'queued',
+    });
+
+    await enqueueJob({
+      jobId: job.id,
+      workflowRunId: run.id,
+      queuedAt: job.created_at,
+      attempt: job.attempt,
     });
 
     jobs.push(job);

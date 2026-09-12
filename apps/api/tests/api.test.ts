@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { runMigrations, closePool } from '@mini-ci/db';
+import { closeRedis, clearQueue, getQueueLength } from '@mini-ci/queue';
 import { buildServer } from '../src/server.js';
 
 describe('REST API Control Plane', () => {
@@ -8,16 +9,19 @@ describe('REST API Control Plane', () => {
 
   beforeAll(async () => {
     await runMigrations();
+    await clearQueue();
     app = buildServer();
     await app.ready();
   });
 
   afterAll(async () => {
+    await clearQueue();
     await app.close();
     await closePool();
+    await closeRedis();
   });
 
-  it('GET /health returns 200 and database connected', async () => {
+  it('GET /health returns 200 with database and redis connected', async () => {
     const res = await app.inject({
       method: 'GET',
       url: '/health',
@@ -27,6 +31,7 @@ describe('REST API Control Plane', () => {
     const body = res.json();
     expect(body.status).toBe('ok');
     expect(body.database).toBe('connected');
+    expect(body.redis).toBe('connected');
     expect(body.timestamp).toBeTruthy();
   });
 
@@ -63,6 +68,9 @@ steps:
     expect(body.jobs[0].status).toBe('queued');
     expect(body.jobs[1].name).toBe('step-2');
     expect(body.jobs[1].status).toBe('queued');
+
+    const queueLength = await getQueueLength();
+    expect(queueLength).toBeGreaterThanOrEqual(2);
   });
 
   it('POST /workflows/runs creates a run from JSON body containing yaml', async () => {

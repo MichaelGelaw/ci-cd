@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@mini-ci/db": "workspace:*",
+    "@mini-ci/queue": "workspace:*",
     "@mini-ci/types": "workspace:*",
     "fastify": "^5.2.0",
     "yaml": "^2.7.0"
