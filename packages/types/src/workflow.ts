@@ -3,11 +3,13 @@
 export interface StepDefinition {
   name?: string;
   run: string;
+  image?: string;
   timeout_seconds?: number;
 }
 
 export interface WorkflowDefinition {
   name: string;
+  image?: string;
   steps: StepDefinition[];
 }
 
