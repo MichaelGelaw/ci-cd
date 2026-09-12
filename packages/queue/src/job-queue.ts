@@ -31,23 +31,41 @@ export async function dequeueJob(timeoutSeconds: number = 0): Promise<JobQueueMe
   }
 }
 
+const ACKNOWLEDGE_LUA = `
+local items = redis.call('LRANGE', KEYS[1], 0, -1)
+for i, item in ipairs(items) do
+  local ok, data = pcall(cjson.decode, item)
+  if ok and data then
+    local jid = data.jobId or data.job_id
+    if jid == ARGV[1] then
+      redis.call('LREM', KEYS[1], 1, item)
+      return 1
+    end
+  end
+end
+return 0
+`;
+
 export async function acknowledgeJob(jobId: string): Promise<boolean> {
   const redis = getRedisClient();
-  const processingItems = await redis.lrange(PROCESSING_KEY, 0, -1);
-
-  for (const item of processingItems) {
-    try {
-      const parsed = JSON.parse(item) as JobQueueMessage;
-      if (parsed.jobId === jobId) {
-        await redis.lrem(PROCESSING_KEY, 1, item);
-        return true;
+  try {
+    const result = await redis.eval(ACKNOWLEDGE_LUA, 1, PROCESSING_KEY, jobId);
+    return result === 1;
+  } catch {
+    const processingItems = await redis.lrange(PROCESSING_KEY, 0, -1);
+    for (const item of processingItems) {
+      try {
+        const parsed = JSON.parse(item) as JobQueueMessage;
+        if (parsed.jobId === jobId) {
+          await redis.lrem(PROCESSING_KEY, 1, item);
+          return true;
+        }
+      } catch {
+        // Ignore unparseable entries
       }
-    } catch {
-      // Ignore unparseable entries
     }
+    return false;
   }
-
-  return false;
 }
 
 export async function getQueueLength(): Promise<number> {
