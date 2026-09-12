@@ -22,5 +22,8 @@ export type {
   LogChunk,
   LogEndEvent,
   LogEvent,
+  ArtifactConfig,
+  ArtifactRecord,
+  CreateArtifactParams,
 } from './workflow.js';
 

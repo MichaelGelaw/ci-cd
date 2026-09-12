@@ -7,6 +7,13 @@ export interface RetryPolicy {
   retry_on_timeout?: boolean;
 }
 
+export interface ArtifactConfig {
+  name?: string;
+  paths?: string[];
+  path?: string;
+  retention_days?: number;
+}
+
 export interface StepDefinition {
   name?: string;
   run: string;
@@ -14,6 +21,7 @@ export interface StepDefinition {
   timeout_seconds?: number;
   retries?: number;
   retry?: RetryPolicy;
+  artifacts?: string[] | ArtifactConfig;
 }
 
 export interface WorkflowDefinition {
@@ -105,6 +113,7 @@ export interface JobRecord {
   lease_duration_seconds: number | null;
   retry_policy: RetryPolicy;
   next_retry_at: string | null;
+  artifacts?: string[] | ArtifactConfig | null;
   created_at: string;
 }
 
@@ -192,5 +201,31 @@ export interface LogEndEvent {
 }
 
 export type LogEvent = LogChunk | LogEndEvent;
+
+// Artifact storage models (Milestone 15)
+
+export interface ArtifactRecord {
+  id: string;
+  job_id: string;
+  workflow_run_id: string;
+  name: string;
+  path: string;
+  size_bytes: number;
+  mime_type: string | null;
+  storage_path: string;
+  checksum: string | null;
+  created_at: string;
+}
+
+export interface CreateArtifactParams {
+  jobId: string;
+  workflowRunId: string;
+  name: string;
+  path: string;
+  sizeBytes: number;
+  mimeType?: string | null;
+  storagePath: string;
+  checksum?: string | null;
+}
 
 
