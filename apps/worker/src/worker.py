@@ -1,6 +1,8 @@
+import json
 import logging
 import platform
 import time
+from datetime import datetime, timezone
 from typing import Optional
 from src.config import WorkerConfig
 from src.queue_consumer import QueueConsumer
@@ -136,13 +138,44 @@ class Worker:
         command = job.get("command", "")
         image = job.get("image")
         timeout_seconds = job.get("timeout_seconds")
+        attempt_num = job.get("attempt", 1)
+
+        def on_log_chunk(stream_name: str, line_text: str):
+            payload = json.dumps({
+                "jobId": job_id,
+                "stream": stream_name,
+                "data": line_text,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "attempt": attempt_num,
+            })
+            try:
+                self.consumer.redis.rpush(f"mini_ci:jobs:{job_id}:log_chunks", payload)
+                self.consumer.redis.expire(f"mini_ci:jobs:{job_id}:log_chunks", 86400)
+                self.consumer.redis.publish(f"mini_ci:jobs:{job_id}:logs", payload)
+            except Exception as ex:
+                logger.warning(f"Failed to publish log chunk for job {job_id}: {ex}")
 
         try:
             result = CommandExecutor.execute(
                 command=command,
                 image=image,
                 timeout_seconds=timeout_seconds,
+                on_log_chunk=on_log_chunk,
             )
+
+            # Publish log end event
+            end_payload = json.dumps({
+                "jobId": job_id,
+                "event": "end",
+                "exitCode": result.exit_code,
+                "durationMs": result.duration_ms,
+            })
+            try:
+                self.consumer.redis.rpush(f"mini_ci:jobs:{job_id}:log_chunks", end_payload)
+                self.consumer.redis.expire(f"mini_ci:jobs:{job_id}:log_chunks", 86400)
+                self.consumer.redis.publish(f"mini_ci:jobs:{job_id}:logs", end_payload)
+            except Exception as ex:
+                logger.warning(f"Failed to publish log end event for job {job_id}: {ex}")
 
             if renewer and renewer.is_conflict():
                 logger.error(
