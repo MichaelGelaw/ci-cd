@@ -362,4 +362,128 @@ steps:
     expect(body.error.code).toBe('NOT_FOUND');
     expect(body.error.message).toContain('/non-existent-endpoint');
   });
+
+  describe('Worker Registration and Discovery API', () => {
+    const testWorkerId = `test-api-worker-${Date.now()}`;
+
+    it('POST /workers/register validates required name field', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/workers/register',
+        payload: { id: 'missing-name' },
+      });
+
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body.error.code).toBe('INVALID_REQUEST_BODY');
+      expect(body.error.message).toContain('"name"');
+    });
+
+    it('POST /workers/register registers worker successfully', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/workers/register',
+        payload: {
+          id: testWorkerId,
+          name: 'ci-runner-linux-01',
+          address: '192.168.1.50:8000',
+          tags: ['docker', 'linux', 'x86_64'],
+          metadata: { cpus: 8, memory_gb: 16 },
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.worker).toBeDefined();
+      expect(body.worker.id).toBe(testWorkerId);
+      expect(body.worker.name).toBe('ci-runner-linux-01');
+      expect(body.worker.status).toBe('ready');
+      expect(body.worker.address).toBe('192.168.1.50:8000');
+      expect(body.worker.tags).toEqual(['docker', 'linux', 'x86_64']);
+      expect(body.worker.metadata).toEqual({ cpus: 8, memory_gb: 16 });
+      expect(body.worker.registered_at).toBeTruthy();
+      expect(body.worker.last_heartbeat_at).toBeTruthy();
+    });
+
+    it('POST /workers/register idempotently updates existing worker', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/workers/register',
+        payload: {
+          id: testWorkerId,
+          name: 'ci-runner-linux-01-updated',
+          address: '192.168.1.51:8000',
+          tags: ['docker', 'linux', 'arm64'],
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.worker.id).toBe(testWorkerId);
+      expect(body.worker.name).toBe('ci-runner-linux-01-updated');
+      expect(body.worker.address).toBe('192.168.1.51:8000');
+      expect(body.worker.tags).toEqual(['docker', 'linux', 'arm64']);
+    });
+
+    it('GET /workers returns registered workers with optional status filter', async () => {
+      const allRes = await app.inject({
+        method: 'GET',
+        url: '/workers',
+      });
+      expect(allRes.statusCode).toBe(200);
+      const allBody = allRes.json();
+      expect(Array.isArray(allBody.workers)).toBe(true);
+      expect(allBody.workers.some((w: any) => w.id === testWorkerId)).toBe(true);
+
+      const readyRes = await app.inject({
+        method: 'GET',
+        url: '/workers?status=ready',
+      });
+      expect(readyRes.statusCode).toBe(200);
+      const readyBody = readyRes.json();
+      expect(readyBody.workers.some((w: any) => w.id === testWorkerId)).toBe(true);
+
+      const invalidRes = await app.inject({
+        method: 'GET',
+        url: '/workers?status=invalid_status',
+      });
+      expect(invalidRes.statusCode).toBe(400);
+      expect(invalidRes.json().error.code).toBe('INVALID_QUERY_PARAMETER');
+    });
+
+    it('GET /workers/:id returns specific worker details or 404', async () => {
+      const foundRes = await app.inject({
+        method: 'GET',
+        url: `/workers/${testWorkerId}`,
+      });
+      expect(foundRes.statusCode).toBe(200);
+      expect(foundRes.json().worker.id).toBe(testWorkerId);
+
+      const notFoundRes = await app.inject({
+        method: 'GET',
+        url: '/workers/non-existent-worker-id',
+      });
+      expect(notFoundRes.statusCode).toBe(404);
+      expect(notFoundRes.json().error.code).toBe('NOT_FOUND');
+    });
+
+    it('POST /workers/:id/heartbeat updates worker timestamp and status', async () => {
+      const heartbeatRes = await app.inject({
+        method: 'POST',
+        url: `/workers/${testWorkerId}/heartbeat`,
+        payload: { status: 'busy' },
+      });
+
+      expect(heartbeatRes.statusCode).toBe(200);
+      const body = heartbeatRes.json();
+      expect(body.worker.id).toBe(testWorkerId);
+      expect(body.worker.status).toBe('busy');
+
+      const notFoundHeartbeat = await app.inject({
+        method: 'POST',
+        url: '/workers/missing-worker/heartbeat',
+      });
+      expect(notFoundHeartbeat.statusCode).toBe(404);
+    });
+  });
 });
