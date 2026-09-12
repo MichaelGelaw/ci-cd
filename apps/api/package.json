@@ -1,0 +1,16 @@
+{
+  "name": "@mini-ci/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "dev": "tsx watch src/main.ts"
+  },
+  "dependencies": {
+    "@mini-ci/db": "workspace:*",
+    "@mini-ci/types": "workspace:*",
+    "fastify": "^5.2.0",
+    "yaml": "^2.7.0"
+  }
+}
