@@ -210,6 +210,81 @@ steps:
     expect(body.job.status).toBe('queued');
   });
 
+  it('POST /jobs/:id/status updates job progress and state', async () => {
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/workflows/runs',
+      headers: { 'content-type': 'application/x-yaml' },
+      payload: `
+name: status-update-test
+steps:
+  - name: test-status
+    run: echo "test"
+`,
+    });
+
+    const jobId = createRes.json().jobs[0].id;
+
+    // Transition: queued -> assigned
+    const assignRes = await app.inject({
+      method: 'POST',
+      url: `/jobs/${jobId}/status`,
+      payload: { status: 'assigned', worker_id: 'worker-test-1' },
+    });
+    expect(assignRes.statusCode).toBe(200);
+    expect(assignRes.json().job.status).toBe('assigned');
+    expect(assignRes.json().job.worker_id).toBe('worker-test-1');
+
+    // Transition: assigned -> running
+    const runRes = await app.inject({
+      method: 'POST',
+      url: `/jobs/${jobId}/status`,
+      payload: { status: 'running' },
+    });
+    expect(runRes.statusCode).toBe(200);
+    expect(runRes.json().job.status).toBe('running');
+
+    // Transition: running -> succeeded
+    const finishRes = await app.inject({
+      method: 'POST',
+      url: `/jobs/${jobId}/status`,
+      payload: {
+        status: 'succeeded',
+        exit_code: 0,
+        stdout: 'job output',
+        duration_ms: 150,
+      },
+    });
+    expect(finishRes.statusCode).toBe(200);
+    expect(finishRes.json().job.status).toBe('succeeded');
+    expect(finishRes.json().job.exit_code).toBe(0);
+    expect(finishRes.json().job.stdout).toBe('job output');
+  });
+
+  it('POST /jobs/:id/status rejects invalid transitions with 400', async () => {
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/workflows/runs',
+      headers: { 'content-type': 'application/x-yaml' },
+      payload: `
+name: invalid-transition-test
+steps:
+  - run: echo "hi"
+`,
+    });
+
+    const jobId = createRes.json().jobs[0].id;
+
+    // Direct queued -> succeeded is illegal (must be assigned -> running -> succeeded)
+    const badRes = await app.inject({
+      method: 'POST',
+      url: `/jobs/${jobId}/status`,
+      payload: { status: 'succeeded' },
+    });
+    expect(badRes.statusCode).toBe(400);
+    expect(badRes.json().error.code).toBe('INVALID_TRANSITION');
+  });
+
   it('POST /jobs/:id/cancel cancels a queued job', async () => {
     const createRes = await app.inject({
       method: 'POST',
