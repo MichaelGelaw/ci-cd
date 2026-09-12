@@ -7,6 +7,8 @@ import { jobRoutes } from './routes/jobs.js';
 import { workerRoutes } from './routes/workers.js';
 import { schedulerRoutes } from './routes/scheduler.js';
 import { artifactRoutes } from './routes/artifacts.js';
+import { repositoryRoutes } from './routes/repositories.js';
+import { webhookRoutes } from './routes/webhooks.js';
 
 export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
   const app = fastify(opts);
@@ -17,6 +19,25 @@ export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
       fileSize: 50 * 1024 * 1024, // 50MB
     },
   });
+
+  // Preserve raw JSON string on request object for HMAC verification
+  app.addContentTypeParser(
+    'application/json',
+    { parseAs: 'string' },
+    (req, body, done) => {
+      try {
+        (req as any).rawBody = body;
+        if (!body || (body as string).trim() === '') {
+          done(null, {});
+          return;
+        }
+        const json = JSON.parse(body as string);
+        done(null, json);
+      } catch (err) {
+        done(err as Error, undefined);
+      }
+    },
+  );
 
   // Accept raw YAML and plain text payloads
   app.addContentTypeParser(
@@ -47,7 +68,7 @@ export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
   });
 
   // Standardized error handler
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error: Error & { statusCode?: number; code?: string }, _request, reply) => {
     const statusCode = error.statusCode ?? 500;
     reply.status(statusCode).send({
       error: {
@@ -64,6 +85,8 @@ export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
   app.register(workerRoutes);
   app.register(schedulerRoutes);
   app.register(artifactRoutes);
+  app.register(repositoryRoutes);
+  app.register(webhookRoutes);
 
   return app;
 }

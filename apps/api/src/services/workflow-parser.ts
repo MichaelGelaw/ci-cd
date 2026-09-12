@@ -7,6 +7,8 @@ import type {
   ArtifactConfig,
   NormalizedWorkflowDefinition,
   NormalizedJobDefinition,
+  WorkflowTriggerConfig,
+  EventTriggerFilter,
 } from '@mini-ci/types';
 
 export function parseStep(
@@ -364,6 +366,7 @@ export function normalizeWorkflow(workflow: WorkflowDefinition): NormalizedWorkf
 
     return {
       name: workflow.name,
+      on: workflow.on,
       image: workflow.image,
       jobs: normalizedJobs,
       topologicalOrder,
@@ -374,6 +377,7 @@ export function normalizeWorkflow(workflow: WorkflowDefinition): NormalizedWorkf
   if (workflow.steps && workflow.steps.length > 0) {
     return {
       name: workflow.name,
+      on: workflow.on,
       image: workflow.image,
       jobs: {
         main: {
@@ -424,6 +428,10 @@ export function parseWorkflowContent(content: string): WorkflowDefinition {
     workflow.env = obj['env'] as Record<string, string>;
   }
 
+  if (obj['on'] !== undefined) {
+    workflow.on = parseWorkflowTrigger(obj['on']);
+  }
+
   const hasJobs = obj['jobs'] !== undefined;
   const hasSteps = obj['steps'] !== undefined;
 
@@ -461,4 +469,132 @@ export function parseWorkflowContent(content: string): WorkflowDefinition {
   }
 
   return workflow;
+}
+
+export function parseWorkflowTrigger(raw: unknown): WorkflowTriggerConfig {
+  if (typeof raw === 'string') {
+    if (raw.trim() === '') {
+      throw new Error('Workflow "on" trigger cannot be an empty string');
+    }
+    return raw.trim();
+  }
+
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) {
+      throw new Error('Workflow "on" trigger list cannot be empty');
+    }
+    return raw.map((item, idx) => {
+      if (typeof item !== 'string' || item.trim() === '') {
+        throw new Error(`Workflow "on" trigger list item ${idx + 1} must be a non-empty string`);
+      }
+      return item.trim();
+    });
+  }
+
+  if (typeof raw === 'object' && raw !== null) {
+    const config: Record<string, EventTriggerFilter | null> = {};
+    for (const [event, val] of Object.entries(raw as Record<string, unknown>)) {
+      if (val === null || val === undefined) {
+        config[event] = null;
+      } else if (typeof val === 'object' && !Array.isArray(val)) {
+        const filterObj = val as Record<string, unknown>;
+        const filter: EventTriggerFilter = {};
+        if (filterObj['branches'] !== undefined) {
+          if (Array.isArray(filterObj['branches'])) {
+            filter.branches = filterObj['branches'].map(String);
+          } else if (typeof filterObj['branches'] === 'string') {
+            filter.branches = [filterObj['branches']];
+          } else {
+            throw new Error(`Workflow "on.${event}.branches" must be a string or list of strings`);
+          }
+        }
+        if (filterObj['types'] !== undefined) {
+          if (Array.isArray(filterObj['types'])) {
+            filter.types = filterObj['types'].map(String);
+          } else if (typeof filterObj['types'] === 'string') {
+            filter.types = [filterObj['types']];
+          } else {
+            throw new Error(`Workflow "on.${event}.types" must be a string or list of strings`);
+          }
+        }
+        config[event] = filter;
+      } else {
+        throw new Error(`Workflow "on.${event}" must be a filter mapping or empty`);
+      }
+    }
+    return config;
+  }
+
+  throw new Error('Workflow "on" must be a string, list of strings, or mapping');
+}
+
+export function matchPattern(pattern: string, target: string): boolean {
+  if (pattern === '*' || pattern === '**') {
+    return true;
+  }
+  if (pattern.includes('*')) {
+    const regexStr =
+      '^' +
+      pattern
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*\*/g, '.*')
+        .replace(/\*/g, '[^/]*') +
+      '$';
+    const regex = new RegExp(regexStr);
+    return regex.test(target);
+  }
+  return pattern === target;
+}
+
+export function shouldTriggerWorkflow(
+  workflow: WorkflowDefinition | NormalizedWorkflowDefinition,
+  event: string,
+  branch?: string,
+  action?: string,
+): boolean {
+  if (!workflow.on) {
+    return true;
+  }
+
+  if (typeof workflow.on === 'string') {
+    return workflow.on === event;
+  }
+
+  if (Array.isArray(workflow.on)) {
+    return workflow.on.includes(event);
+  }
+
+  if (typeof workflow.on === 'object') {
+    const eventConfig = (workflow.on as Record<string, EventTriggerFilter | null | undefined>)[
+      event
+    ];
+    if (eventConfig === undefined) {
+      return false;
+    }
+
+    if (eventConfig === null) {
+      return true;
+    }
+
+    if (eventConfig.branches && eventConfig.branches.length > 0 && branch) {
+      const cleanBranch = branch.startsWith('refs/heads/') ? branch.slice(11) : branch;
+      const branchMatches = eventConfig.branches.some((pattern) =>
+        matchPattern(pattern, cleanBranch),
+      );
+      if (!branchMatches) {
+        return false;
+      }
+    }
+
+    if (eventConfig.types && eventConfig.types.length > 0 && action) {
+      const typeMatches = eventConfig.types.includes(action);
+      if (!typeMatches) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  return false;
 }

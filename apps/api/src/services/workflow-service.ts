@@ -7,7 +7,7 @@ import {
   getJobsByWorkflowRun,
   cancelWorkflowRun,
 } from '@mini-ci/db';
-import type { CancelWorkflowRunResult } from '@mini-ci/db';
+import type { CancelWorkflowRunResult, CreateWorkflowRunOptions } from '@mini-ci/db';
 import { enqueueJob, publishJobCancellation } from '@mini-ci/queue';
 import { parseWorkflowContent } from './workflow-parser.js';
 
@@ -16,8 +16,23 @@ export interface WorkflowSubmissionResult {
   jobs: JobRecord[];
 }
 
+export interface SubmitWorkflowOptions extends CreateWorkflowRunOptions {
+  env?: Record<string, string>;
+}
+
+function buildJobCommand(baseCommand: string, env?: Record<string, string>): string {
+  if (!env || Object.keys(env).length === 0) {
+    return baseCommand;
+  }
+  const exports = Object.entries(env)
+    .map(([k, v]) => `export ${k}="${String(v).replace(/(["\\$`])/g, '\\$1')}"`)
+    .join('\n');
+  return `${exports}\n${baseCommand}`;
+}
+
 export async function submitWorkflow(
   yamlOrDef: string | WorkflowDefinition,
+  options?: SubmitWorkflowOptions,
 ): Promise<WorkflowSubmissionResult> {
   let definition: WorkflowDefinition;
 
@@ -27,7 +42,7 @@ export async function submitWorkflow(
     definition = yamlOrDef;
   }
 
-  const run = await createWorkflowRun(definition.name, 'running');
+  const run = await createWorkflowRun(definition.name, 'running', options);
 
   const jobs: JobRecord[] = [];
 
@@ -43,7 +58,9 @@ export async function submitWorkflow(
 
       // Combine step commands into a single script if multiple steps
       const steps = jobDef.steps ?? (jobDef.run ? [{ run: jobDef.run }] : []);
-      const command = steps.map((s) => s.run).join('\n');
+      const rawCommand = steps.map((s) => s.run).join('\n');
+      const mergedEnv = { ...definition.env, ...jobDef.env, ...options?.env };
+      const command = buildJobCommand(rawCommand, mergedEnv);
 
       const retryPolicy =
         jobDef.retry ??
@@ -82,6 +99,8 @@ export async function submitWorkflow(
       const step = definition.steps[i]!;
       const stepName = step.name ?? `Step ${i + 1}`;
       const image = step.image ?? definition.image;
+      const mergedEnv = { ...definition.env, ...options?.env };
+      const command = buildJobCommand(step.run, mergedEnv);
 
       const retryPolicy =
         step.retry ?? (step.retries !== undefined ? { max_attempts: step.retries + 1 } : undefined);
@@ -90,7 +109,7 @@ export async function submitWorkflow(
         jobKey: `step-${i + 1}`,
         needs: i > 0 ? [`step-${i}`] : [],
         name: stepName,
-        command: step.run,
+        command,
         image: image ?? null,
         timeoutSeconds: step.timeout_seconds ?? null,
         status: 'queued',
