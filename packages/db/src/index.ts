@@ -12,4 +12,9 @@ export {
   updateJobStatus,
   recordJobAttempt,
   getJobAttempts,
+  registerWorker,
+  getWorker,
+  listWorkers,
+  updateWorkerStatus,
+  touchWorkerHeartbeat,
 } from './repository.js';

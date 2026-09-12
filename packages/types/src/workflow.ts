@@ -117,3 +117,32 @@ export interface JobQueueMessage {
   attempt: number;
 }
 
+// Worker registration model (Milestone 7)
+
+export type WorkerStatus = 'ready' | 'busy' | 'offline' | 'paused';
+
+export interface WorkerRecord {
+  id: string;
+  name: string;
+  status: WorkerStatus;
+  address: string | null;
+  tags: string[];
+  metadata: Record<string, unknown>;
+  registered_at: string;
+  last_heartbeat_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RegisterWorkerRequest {
+  id: string;
+  name: string;
+  address?: string | null;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface WorkerHeartbeatRequest {
+  status?: WorkerStatus;
+}
+

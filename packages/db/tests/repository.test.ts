@@ -11,6 +11,11 @@ import {
   updateJobStatus,
   recordJobAttempt,
   getJobAttempts,
+  registerWorker,
+  getWorker,
+  listWorkers,
+  updateWorkerStatus,
+  touchWorkerHeartbeat,
 } from '../src/index.js';
 
 describe('Database Repository', () => {
@@ -132,5 +137,60 @@ describe('Database Repository', () => {
     expect(attempts).toHaveLength(2);
     expect(attempts[0]?.status).toBe('failed');
     expect(attempts[1]?.status).toBe('succeeded');
+  });
+
+  it('registers, retrieves, lists, and updates workers', async () => {
+    const workerId = `worker-test-${Date.now()}`;
+
+    // Register worker
+    const worker = await registerWorker({
+      id: workerId,
+      name: 'worker-node-1',
+      address: '10.0.0.1:5000',
+      tags: ['docker', 'linux', 'python'],
+      metadata: { os: 'linux', arch: 'x86_64', cpus: 4 },
+    });
+
+    expect(worker.id).toBe(workerId);
+    expect(worker.name).toBe('worker-node-1');
+    expect(worker.status).toBe('ready');
+    expect(worker.address).toBe('10.0.0.1:5000');
+    expect(worker.tags).toEqual(['docker', 'linux', 'python']);
+    expect(worker.metadata).toEqual({ os: 'linux', arch: 'x86_64', cpus: 4 });
+
+    // Retrieve worker by ID
+    const fetched = await getWorker(workerId);
+    expect(fetched).not.toBeNull();
+    expect(fetched?.id).toBe(workerId);
+    expect(fetched?.status).toBe('ready');
+
+    // List workers with filter
+    const readyWorkers = await listWorkers({ status: 'ready' });
+    expect(readyWorkers.some((w) => w.id === workerId)).toBe(true);
+
+    // Update worker status to busy
+    const busyWorker = await updateWorkerStatus(workerId, 'busy');
+    expect(busyWorker.status).toBe('busy');
+
+    // Touch heartbeat
+    const touchedWorker = await touchWorkerHeartbeat(workerId, 'ready');
+    expect(touchedWorker.status).toBe('ready');
+    expect(new Date(touchedWorker.last_heartbeat_at).getTime()).toBeGreaterThanOrEqual(
+      new Date(worker.last_heartbeat_at).getTime(),
+    );
+
+    // Re-registration is idempotent and updates fields
+    const updatedWorker = await registerWorker({
+      id: workerId,
+      name: 'worker-node-1-renamed',
+      address: '10.0.0.2:5000',
+      tags: ['docker', 'arm64'],
+      metadata: { os: 'linux', arch: 'arm64' },
+    });
+    expect(updatedWorker.id).toBe(workerId);
+    expect(updatedWorker.name).toBe('worker-node-1-renamed');
+    expect(updatedWorker.address).toBe('10.0.0.2:5000');
+    expect(updatedWorker.tags).toEqual(['docker', 'arm64']);
+    expect(updatedWorker.status).toBe('ready');
   });
 });

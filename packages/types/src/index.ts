@@ -11,4 +11,8 @@ export type {
   JobRecord,
   JobAttemptRecord,
   JobQueueMessage,
+  WorkerStatus,
+  WorkerRecord,
+  RegisterWorkerRequest,
+  WorkerHeartbeatRequest,
 } from './workflow.js';

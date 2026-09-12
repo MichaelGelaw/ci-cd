@@ -4,6 +4,8 @@ import type {
   JobAttemptRecord,
   JobStatus,
   RunStatus,
+  WorkerRecord,
+  WorkerStatus,
 } from '@mini-ci/types';
 import { getPool } from './connection.js';
 import { assertValidTransition } from './state-machine.js';
@@ -453,4 +455,193 @@ export async function getJobAttempts(jobId: string): Promise<JobAttemptRecord[]>
     [jobId],
   );
   return rows;
+}
+
+export async function registerWorker(params: {
+  id: string;
+  name: string;
+  address?: string | null;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+}): Promise<WorkerRecord> {
+  const pool = getPool();
+  const tags = params.tags ?? [];
+  const metadata = JSON.stringify(params.metadata ?? {});
+  const address = params.address ?? null;
+
+  const { rows } = await pool.query<WorkerRecord>(
+    `
+    INSERT INTO workers (
+      id,
+      name,
+      status,
+      address,
+      tags,
+      metadata,
+      registered_at,
+      last_heartbeat_at,
+      updated_at
+    )
+    VALUES ($1, $2, 'ready', $3, $4, $5::jsonb, NOW(), NOW(), NOW())
+    ON CONFLICT (id) DO UPDATE SET
+      name = EXCLUDED.name,
+      address = EXCLUDED.address,
+      tags = EXCLUDED.tags,
+      metadata = EXCLUDED.metadata,
+      status = 'ready',
+      last_heartbeat_at = NOW(),
+      updated_at = NOW()
+    RETURNING
+      id,
+      name,
+      status,
+      address,
+      tags,
+      metadata,
+      registered_at::text,
+      last_heartbeat_at::text,
+      created_at::text,
+      updated_at::text;
+    `,
+    [params.id, params.name, address, tags, metadata],
+  );
+
+  return rows[0]!;
+}
+
+export async function getWorker(id: string): Promise<WorkerRecord | null> {
+  const pool = getPool();
+  const { rows } = await pool.query<WorkerRecord>(
+    `
+    SELECT
+      id,
+      name,
+      status,
+      address,
+      tags,
+      metadata,
+      registered_at::text,
+      last_heartbeat_at::text,
+      created_at::text,
+      updated_at::text
+    FROM workers
+    WHERE id = $1;
+    `,
+    [id],
+  );
+  return rows[0] ?? null;
+}
+
+export async function listWorkers(filter: {
+  status?: WorkerStatus;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<WorkerRecord[]> {
+  const pool = getPool();
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  let paramIndex = 1;
+
+  if (filter.status) {
+    conditions.push(`status = $${paramIndex++}`);
+    values.push(filter.status);
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const limit = filter.limit ?? 50;
+  const offset = filter.offset ?? 0;
+  values.push(limit, offset);
+
+  const query = `
+    SELECT
+      id,
+      name,
+      status,
+      address,
+      tags,
+      metadata,
+      registered_at::text,
+      last_heartbeat_at::text,
+      created_at::text,
+      updated_at::text
+    FROM workers
+    ${whereClause}
+    ORDER BY registered_at DESC
+    LIMIT $${paramIndex++} OFFSET $${paramIndex++};
+  `;
+
+  const { rows } = await pool.query<WorkerRecord>(query, values);
+  return rows;
+}
+
+export async function updateWorkerStatus(id: string, status: WorkerStatus): Promise<WorkerRecord> {
+  const pool = getPool();
+  const { rows } = await pool.query<WorkerRecord>(
+    `
+    UPDATE workers
+    SET
+      status = $2,
+      updated_at = NOW()
+    WHERE id = $1
+    RETURNING
+      id,
+      name,
+      status,
+      address,
+      tags,
+      metadata,
+      registered_at::text,
+      last_heartbeat_at::text,
+      created_at::text,
+      updated_at::text;
+    `,
+    [id, status],
+  );
+
+  if (rows.length === 0) {
+    throw new Error(`Worker ${id} not found`);
+  }
+
+  return rows[0]!;
+}
+
+export async function touchWorkerHeartbeat(
+  id: string,
+  status?: WorkerStatus,
+): Promise<WorkerRecord> {
+  const pool = getPool();
+  const setClauses: string[] = ['last_heartbeat_at = NOW()', 'updated_at = NOW()'];
+  const values: unknown[] = [id];
+  let paramIndex = 2;
+
+  if (status !== undefined) {
+    setClauses.push(`status = $${paramIndex++}`);
+    values.push(status);
+  }
+
+  const { rows } = await pool.query<WorkerRecord>(
+    `
+    UPDATE workers
+    SET ${setClauses.join(', ')}
+    WHERE id = $1
+    RETURNING
+      id,
+      name,
+      status,
+      address,
+      tags,
+      metadata,
+      registered_at::text,
+      last_heartbeat_at::text,
+      created_at::text,
+      updated_at::text;
+    `,
+    values,
+  );
+
+  if (rows.length === 0) {
+    throw new Error(`Worker ${id} not found`);
+  }
+
+  return rows[0]!;
 }
