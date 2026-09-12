@@ -4,7 +4,7 @@ import type { JobStatus } from '@mini-ci/types';
 const LEGAL_TRANSITIONS: Record<JobStatus, readonly JobStatus[]> = {
   created: ['queued', 'cancelled'],
   queued: ['assigned', 'cancelled'],
-  assigned: ['running', 'cancelled'],
+  assigned: ['running', 'failed', 'cancelled'],
   running: ['succeeded', 'failed', 'cancelled', 'timed_out'],
   failed: ['retrying'],
   timed_out: ['retrying'],

@@ -14,6 +14,7 @@ describe('Job State Machine', () => {
     expect(isValidTransition('created', 'cancelled')).toBe(true);
     expect(isValidTransition('queued', 'cancelled')).toBe(true);
     expect(isValidTransition('assigned', 'cancelled')).toBe(true);
+    expect(isValidTransition('assigned', 'failed')).toBe(true);
     expect(isValidTransition('running', 'cancelled')).toBe(true);
     expect(isValidTransition('running', 'failed')).toBe(true);
     expect(isValidTransition('running', 'timed_out')).toBe(true);

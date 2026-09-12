@@ -29,6 +29,14 @@ export {
   findExpiredLeases,
   findDueRetryingJobs,
   requeueJobForRetry,
+  findRecoverableJobs,
+  recoverJob,
+  recoverStaleJobs,
+} from './repository.js';
+export type {
+  FindRecoverableJobsOptions,
+  RecoverJobOptions,
+  RecoverJobResult,
 } from './repository.js';
 export { calculateRetryDelay, isFailureRetryable } from './retry.js';
 

@@ -11,6 +11,7 @@ import type {
 import { randomUUID } from 'node:crypto';
 import { getPool } from './connection.js';
 import { assertValidTransition } from './state-machine.js';
+import { calculateRetryDelay } from './retry.js';
 
 export async function createWorkflowRun(
   workflowName: string,
@@ -1226,3 +1227,409 @@ export async function findStaleWorkers(timeoutSeconds: number = 30): Promise<Wor
   );
   return rows;
 }
+
+export interface FindRecoverableJobsOptions {
+  leaseGracePeriodSeconds?: number;
+  heartbeatTimeoutSeconds?: number;
+}
+
+export async function findRecoverableJobs(
+  options: FindRecoverableJobsOptions = {},
+): Promise<JobRecord[]> {
+  const leaseGracePeriod = options.leaseGracePeriodSeconds ?? 0;
+  const heartbeatTimeout = options.heartbeatTimeoutSeconds ?? 30;
+  const pool = getPool();
+
+  const { rows } = await pool.query<JobRecord>(
+    `
+    SELECT
+      j.id,
+      j.workflow_run_id,
+      j.name,
+      j.command,
+      j.image,
+      j.status,
+      j.priority,
+      j.attempt,
+      j.max_attempts,
+      j.worker_id,
+      j.exit_code,
+      j.stdout,
+      j.stderr,
+      j.error,
+      j.timeout_seconds,
+      j.started_at::text,
+      j.finished_at::text,
+      j.duration_ms,
+      j.lease_token,
+      j.lease_expires_at::text,
+      j.lease_duration_seconds,
+      j.retry_policy,
+      j.next_retry_at::text,
+      j.created_at::text
+    FROM jobs j
+    LEFT JOIN workers w ON j.worker_id = w.id
+    WHERE j.status IN ('assigned', 'running')
+      AND (
+        (j.lease_expires_at IS NOT NULL AND j.lease_expires_at < NOW() - ($1 * interval '1 second'))
+        OR
+        (j.worker_id IS NOT NULL AND w.status = 'offline')
+        OR
+        (j.worker_id IS NOT NULL AND w.last_heartbeat_at < NOW() - ($2 * interval '1 second'))
+        OR
+        (j.worker_id IS NOT NULL AND w.id IS NULL)
+      )
+    ORDER BY j.lease_expires_at ASC NULLS FIRST, j.created_at ASC;
+    `,
+    [leaseGracePeriod, heartbeatTimeout],
+  );
+
+  return rows;
+}
+
+export interface RecoverJobOptions {
+  immediateRequeue?: boolean;
+}
+
+export interface RecoverJobResult {
+  job: JobRecord;
+  action: 'retrying' | 'requeued' | 'failed' | 'ignored';
+  reason: string;
+}
+
+export async function recoverJob(
+  jobId: string,
+  reason?: string,
+  options: RecoverJobOptions = {},
+): Promise<RecoverJobResult> {
+  const failureReason = reason ?? 'Worker failure: worker crashed or lease expired';
+  const pool = getPool();
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query<JobRecord>(
+      `
+      SELECT
+        id,
+        workflow_run_id,
+        name,
+        command,
+        image,
+        status,
+        priority,
+        attempt,
+        max_attempts,
+        worker_id,
+        exit_code,
+        stdout,
+        stderr,
+        error,
+        timeout_seconds,
+        started_at::text,
+        finished_at::text,
+        duration_ms,
+        lease_token,
+        lease_expires_at::text,
+        lease_duration_seconds,
+        retry_policy,
+        next_retry_at::text,
+        created_at::text
+      FROM jobs
+      WHERE id = $1
+      FOR UPDATE;
+      `,
+      [jobId],
+    );
+
+    if (rows.length === 0) {
+      throw new Error(`Job ${jobId} not found`);
+    }
+
+    const job = rows[0]!;
+
+    // Only active jobs (assigned or running) are eligible for recovery
+    if (job.status !== 'assigned' && job.status !== 'running') {
+      await client.query('ROLLBACK');
+      return {
+        job,
+        action: 'ignored',
+        reason: `Job is in status '${job.status}', not eligible for recovery`,
+      };
+    }
+
+    const finishedAt = new Date();
+    const durationMs = job.started_at
+      ? Math.max(0, finishedAt.getTime() - new Date(job.started_at).getTime())
+      : null;
+
+    // Record attempt as failed due to worker failure
+    await client.query(
+      `
+      INSERT INTO job_attempts (
+        job_id,
+        attempt_number,
+        status,
+        exit_code,
+        stdout,
+        stderr,
+        error,
+        started_at,
+        finished_at,
+        duration_ms
+      )
+      VALUES ($1, $2, 'failed', 1, $3, $4, $5, COALESCE($6, NOW()), $7, $8)
+      ON CONFLICT (job_id, attempt_number)
+      DO UPDATE SET
+        status = 'failed',
+        exit_code = 1,
+        error = EXCLUDED.error,
+        finished_at = EXCLUDED.finished_at,
+        duration_ms = EXCLUDED.duration_ms;
+      `,
+      [
+        job.id,
+        job.attempt,
+        job.stdout ?? '',
+        job.stderr ?? '',
+        failureReason,
+        job.started_at ?? null,
+        finishedAt,
+        durationMs,
+      ],
+    );
+
+    const isRetryable = job.attempt < job.max_attempts;
+
+    if (isRetryable) {
+      // Transition: assigned/running -> failed
+      await client.query(
+        `
+        UPDATE jobs
+        SET
+          status = 'failed',
+          error = $2,
+          finished_at = $3,
+          duration_ms = $4,
+          lease_token = NULL,
+          lease_expires_at = NULL
+        WHERE id = $1;
+        `,
+        [job.id, failureReason, finishedAt, durationMs],
+      );
+
+      if (options.immediateRequeue) {
+        // Transition: failed -> retrying -> queued
+        await client.query(
+          `
+          UPDATE jobs
+          SET status = 'retrying'
+          WHERE id = $1;
+          `,
+          [job.id],
+        );
+
+        const { rows: requeuedRows } = await client.query<JobRecord>(
+          `
+          UPDATE jobs
+          SET
+            status = 'queued',
+            attempt = attempt + 1,
+            worker_id = NULL,
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            next_retry_at = NULL,
+            exit_code = NULL,
+            error = NULL,
+            started_at = NULL,
+            finished_at = NULL,
+            duration_ms = NULL
+          WHERE id = $1
+          RETURNING
+            id,
+            workflow_run_id,
+            name,
+            command,
+            image,
+            status,
+            priority,
+            attempt,
+            max_attempts,
+            worker_id,
+            exit_code,
+            stdout,
+            stderr,
+            error,
+            timeout_seconds,
+            started_at::text,
+            finished_at::text,
+            duration_ms,
+            lease_token,
+            lease_expires_at::text,
+            lease_duration_seconds,
+            retry_policy,
+            next_retry_at::text,
+            created_at::text;
+          `,
+          [job.id],
+        );
+
+        await client.query('COMMIT');
+        return {
+          job: requeuedRows[0]!,
+          action: 'requeued',
+          reason: failureReason,
+        };
+      } else {
+        // Transition to retrying with exponential backoff
+        const delaySeconds = calculateRetryDelay(job.attempt, job.retry_policy);
+        const nextRetryAt = new Date(Date.now() + delaySeconds * 1000);
+
+        const { rows: retryingRows } = await client.query<JobRecord>(
+          `
+          UPDATE jobs
+          SET
+            status = 'retrying',
+            next_retry_at = $2,
+            worker_id = NULL
+          WHERE id = $1
+          RETURNING
+            id,
+            workflow_run_id,
+            name,
+            command,
+            image,
+            status,
+            priority,
+            attempt,
+            max_attempts,
+            worker_id,
+            exit_code,
+            stdout,
+            stderr,
+            error,
+            timeout_seconds,
+            started_at::text,
+            finished_at::text,
+            duration_ms,
+            lease_token,
+            lease_expires_at::text,
+            lease_duration_seconds,
+            retry_policy,
+            next_retry_at::text,
+            created_at::text;
+          `,
+          [job.id, nextRetryAt],
+        );
+
+        await client.query('COMMIT');
+        return {
+          job: retryingRows[0]!,
+          action: 'retrying',
+          reason: failureReason,
+        };
+      }
+    } else {
+      // Retries exhausted: transition to terminal failed status
+      const { rows: failedRows } = await client.query<JobRecord>(
+        `
+        UPDATE jobs
+        SET
+          status = 'failed',
+          error = $2,
+          finished_at = $3,
+          duration_ms = $4,
+          lease_token = NULL,
+          lease_expires_at = NULL
+        WHERE id = $1
+        RETURNING
+          id,
+          workflow_run_id,
+          name,
+          command,
+          image,
+          status,
+          priority,
+          attempt,
+          max_attempts,
+          worker_id,
+          exit_code,
+          stdout,
+          stderr,
+          error,
+          timeout_seconds,
+          started_at::text,
+          finished_at::text,
+          duration_ms,
+          lease_token,
+          lease_expires_at::text,
+          lease_duration_seconds,
+          retry_policy,
+          next_retry_at::text,
+          created_at::text;
+        `,
+        [job.id, failureReason, finishedAt, durationMs],
+      );
+
+      // Check sibling jobs and mark workflow_run failed if all terminal
+      const { rows: siblingRows } = await client.query<JobRecord>(
+        'SELECT status, duration_ms FROM jobs WHERE workflow_run_id = $1;',
+        [job.workflow_run_id],
+      );
+
+      const allTerminal = siblingRows.every((j) =>
+        ['succeeded', 'failed', 'cancelled', 'timed_out'].includes(j.status),
+      );
+
+      if (allTerminal) {
+        const totalDuration = siblingRows.reduce((acc, j) => acc + (j.duration_ms ?? 0), 0);
+        await client.query(
+          `
+          UPDATE workflow_runs
+          SET
+            status = 'failed',
+            finished_at = NOW(),
+            duration_ms = $2,
+            error = 'One or more jobs failed, timed out, or were cancelled'
+          WHERE id = $1;
+          `,
+          [job.workflow_run_id, totalDuration],
+        );
+      }
+
+      await client.query('COMMIT');
+      return {
+        job: failedRows[0]!,
+        action: 'failed',
+        reason: failureReason,
+      };
+    }
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function recoverStaleJobs(
+  options: FindRecoverableJobsOptions = {},
+): Promise<RecoverJobResult[]> {
+  const recoverableJobs = await findRecoverableJobs(options);
+  const results: RecoverJobResult[] = [];
+
+  for (const job of recoverableJobs) {
+    const isLeaseExpired =
+      job.lease_expires_at && new Date(job.lease_expires_at) < new Date();
+    const reason = isLeaseExpired
+      ? `Worker failure: lease expired for worker ${job.worker_id ?? 'unknown'}`
+      : `Worker failure: worker ${job.worker_id ?? 'unknown'} is offline or unresponsive`;
+
+    const result = await recoverJob(job.id, reason);
+    results.push(result);
+  }
+
+  return results;
+}
+

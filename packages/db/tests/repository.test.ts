@@ -27,6 +27,9 @@ import {
   requeueJobForRetry,
   calculateRetryDelay,
   isFailureRetryable,
+  findRecoverableJobs,
+  recoverJob,
+  recoverStaleJobs,
   getPool,
 } from '../src/index.js';
 
@@ -424,6 +427,108 @@ describe('Database Repository', () => {
     expect(requeuedJob.next_retry_at).toBeNull();
     expect(requeuedJob.exit_code).toBeNull();
   });
+
+  it('detects and recovers orphaned jobs with expired leases or dead workers', async () => {
+    const run = await createWorkflowRun('recovery-test-workflow', 'running');
+    const pool = getPool();
+
+    // Create worker 1
+    const worker1 = await registerWorker({
+      id: `worker-crashed-${Date.now()}`,
+      name: 'worker-crashed',
+      tags: ['docker'],
+    });
+
+    // Create job 1: assigned to worker1, with expired lease, 2 attempts
+    const job1 = await createJob({
+      workflowRunId: run.id,
+      name: 'step-expired-lease',
+      command: 'echo test',
+      maxAttempts: 2,
+    });
+    await updateJobStatus(job1.id, 'queued');
+    await assignJobToWorker(job1.id, worker1.id, 30);
+    await updateJobStatus(job1.id, 'running');
+
+    // Backdate lease to expired
+    await pool.query(
+      "UPDATE jobs SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE id = $1;",
+      [job1.id],
+    );
+
+    // Create job 2: assigned to worker1, retries exhausted (maxAttempts: 1)
+    const job2 = await createJob({
+      workflowRunId: run.id,
+      name: 'step-exhausted-retries',
+      command: 'echo test-2',
+      maxAttempts: 1,
+    });
+    await updateJobStatus(job2.id, 'queued');
+    await assignJobToWorker(job2.id, worker1.id, 30);
+
+    // Set worker1 to offline (simulating worker crash/reaping)
+    await updateWorkerStatus(worker1.id, 'offline');
+
+    // findRecoverableJobs should find both job1 and job2
+    const recoverable = await findRecoverableJobs();
+    expect(recoverable.some((j) => j.id === job1.id)).toBe(true);
+    expect(recoverable.some((j) => j.id === job2.id)).toBe(true);
+
+    // Recover job1: retries remain, should transition to retrying
+    const recovery1 = await recoverJob(job1.id, 'Worker crashed during execution');
+    expect(recovery1.action).toBe('retrying');
+    expect(recovery1.job.status).toBe('retrying');
+    expect(recovery1.job.lease_token).toBeNull();
+    expect(recovery1.job.lease_expires_at).toBeNull();
+
+    // Verify attempt was recorded as failed
+    const attempts1 = await getJobAttempts(job1.id);
+    expect(attempts1.length).toBe(1);
+    expect(attempts1[0]?.status).toBe('failed');
+    expect(attempts1[0]?.error).toContain('Worker crashed');
+
+    // Recover job2: retries exhausted, should transition to terminal failed
+    const recovery2 = await recoverJob(job2.id, 'Worker offline before execution');
+    expect(recovery2.action).toBe('failed');
+    expect(recovery2.job.status).toBe('failed');
+    expect(recovery2.job.error).toContain('Worker offline');
+
+    // Recovering a job already failed should be ignored
+    const recovery2Again = await recoverJob(job2.id);
+    expect(recovery2Again.action).toBe('ignored');
+
+    // Test immediate requeue option
+    const job3 = await createJob({
+      workflowRunId: run.id,
+      name: 'step-immediate-recovery',
+      command: 'echo test-3',
+      maxAttempts: 3,
+    });
+    await updateJobStatus(job3.id, 'queued');
+    await assignJobToWorker(job3.id, worker1.id, 30);
+
+    const recovery3 = await recoverJob(job3.id, 'Immediate recovery test', {
+      immediateRequeue: true,
+    });
+    expect(recovery3.action).toBe('requeued');
+    expect(recovery3.job.status).toBe('queued');
+    expect(recovery3.job.attempt).toBe(2);
+    expect(recovery3.job.worker_id).toBeNull();
+
+    // Test batch recoverStaleJobs
+    const job4 = await createJob({
+      workflowRunId: run.id,
+      name: 'step-batch-recover',
+      command: 'echo test-4',
+      maxAttempts: 2,
+    });
+    await updateJobStatus(job4.id, 'queued');
+    await assignJobToWorker(job4.id, worker1.id, 30);
+
+    const batchRecovered = await recoverStaleJobs();
+    expect(batchRecovered.some((r) => r.job.id === job4.id)).toBe(true);
+  });
 });
+
 
 
