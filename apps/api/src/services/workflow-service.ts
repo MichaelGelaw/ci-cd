@@ -10,6 +10,7 @@ import {
 import type { CancelWorkflowRunResult, CreateWorkflowRunOptions } from '@mini-ci/db';
 import { enqueueJob, publishJobCancellation } from '@mini-ci/queue';
 import { parseWorkflowContent } from './workflow-parser.js';
+import { recordWorkflowStatus } from '../metrics.js';
 
 export interface WorkflowSubmissionResult {
   run: WorkflowRunRecord;
@@ -89,6 +90,8 @@ export async function submitWorkflow(
           workflowRunId: run.id,
           queuedAt: job.created_at,
           attempt: job.attempt,
+          correlationId: run.id,
+          traceId: run.id,
         });
       }
 
@@ -122,11 +125,15 @@ export async function submitWorkflow(
         workflowRunId: run.id,
         queuedAt: job.created_at,
         attempt: job.attempt,
+        correlationId: run.id,
+        traceId: run.id,
       });
 
       jobs.push(job);
     }
   }
+
+  recordWorkflowStatus('running', options?.triggerEvent);
 
   return { run, jobs };
 }
@@ -155,6 +162,7 @@ export async function cancelWorkflowRunService(
   reason: string = 'Cancelled by user request',
 ): Promise<CancelWorkflowRunResult> {
   const result = await cancelWorkflowRun(runId, reason);
+  recordWorkflowStatus('cancelled');
 
   for (const job of result.cancelledJobs) {
     try {

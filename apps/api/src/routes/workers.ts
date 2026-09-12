@@ -9,6 +9,7 @@ import {
   findStaleWorkersService,
 } from '../services/worker-service.js';
 import { recoverStaleJobsService } from '../services/job-service.js';
+import { recordWorkerRegistration, recordWorkerHeartbeat } from '../metrics.js';
 
 const VALID_WORKER_STATUSES: Set<WorkerStatus> = new Set(['ready', 'busy', 'offline', 'paused']);
 
@@ -35,6 +36,8 @@ export const workerRoutes: FastifyPluginAsync = async (app) => {
           ? (body['metadata'] as Record<string, unknown>)
           : undefined,
     });
+
+    recordWorkerRegistration();
 
     return reply.status(200).send({ worker });
   });
@@ -99,6 +102,7 @@ export const workerRoutes: FastifyPluginAsync = async (app) => {
 
     try {
       const worker = await touchWorkerHeartbeatService(id, status);
+      recordWorkerHeartbeat(status ?? 'ready');
       return reply.status(200).send({ worker });
     } catch (err) {
       const message = (err as Error).message;

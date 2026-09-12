@@ -9,8 +9,23 @@ async function main(): Promise<void> {
   console.log('Running database migrations...');
   await runMigrations();
 
+  const logLevel = process.env['LOG_LEVEL'] ?? 'info';
   const app = buildServer({
-    logger: false,
+    logger:
+      logLevel === 'silent'
+        ? false
+        : {
+            level: logLevel,
+            serializers: {
+              req(req) {
+                return {
+                  method: req.method,
+                  url: req.url,
+                  reqId: req.id,
+                };
+              },
+            },
+          },
   });
 
   const stop = async (): Promise<void> => {

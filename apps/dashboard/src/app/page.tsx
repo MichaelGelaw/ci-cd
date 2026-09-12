@@ -53,9 +53,19 @@ export default function OverviewPage() {
           <h1 className="page-title">Overview</h1>
           <p className="page-subtitle">Platform health, workflow throughput, and worker allocation</p>
         </div>
-        <button onClick={loadData} className="btn btn-secondary btn-sm">
-          Refresh
-        </button>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <a
+            href="/api-proxy/metrics"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn btn-secondary btn-sm"
+          >
+            Prometheus Metrics
+          </a>
+          <button onClick={loadData} className="btn btn-secondary btn-sm">
+            Refresh
+          </button>
+        </div>
       </div>
 
       {error && (

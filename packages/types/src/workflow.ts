@@ -202,6 +202,8 @@ export interface JobQueueMessage {
   workflowRunId: string;
   queuedAt: string;
   attempt: number;
+  correlationId?: string;
+  traceId?: string;
 }
 
 // Worker registration model (Milestone 7)

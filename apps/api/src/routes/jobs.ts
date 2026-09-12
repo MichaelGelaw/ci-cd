@@ -19,6 +19,7 @@ import {
   getBufferedLogs,
   subscribeJobLogs,
 } from '../services/log-service.js';
+import { recordJobStatus } from '../metrics.js';
 
 export const jobRoutes: FastifyPluginAsync = async (app) => {
   app.get('/jobs/recoverable', async (request, reply) => {
@@ -306,6 +307,11 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
         durationMs: typeof body['duration_ms'] === 'number' ? body['duration_ms'] : undefined,
       });
 
+      recordJobStatus(
+        body['status'] as string,
+        typeof body['duration_ms'] === 'number' ? body['duration_ms'] / 1000 : undefined,
+      );
+
       return reply.status(200).send({ job });
     } catch (err) {
       const message = (err as Error).message;
@@ -344,6 +350,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
 
     try {
       const job = await cancelJob(id, reason);
+      recordJobStatus('cancelled');
       return reply.status(200).send({ job });
     } catch (err) {
       const message = (err as Error).message;

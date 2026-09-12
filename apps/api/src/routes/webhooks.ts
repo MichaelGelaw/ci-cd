@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { processGitHubWebhook, InvalidSignatureError } from '../services/webhook-service.js';
+import { recordWebhook } from '../metrics.js';
 
 export const webhookRoutes: FastifyPluginAsync = async (app) => {
   app.post('/webhooks/github', async (request, reply) => {
@@ -26,6 +27,8 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
         payload,
       });
 
+      recordWebhook(eventHeader, result.status);
+
       if (result.status === 'pong') {
         return reply.status(200).send({
           message: 'pong',
@@ -51,6 +54,7 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
         runs: result.runs,
       });
     } catch (err) {
+      recordWebhook(eventHeader, 'error');
       if (err instanceof InvalidSignatureError) {
         return reply.status(401).send({
           error: {

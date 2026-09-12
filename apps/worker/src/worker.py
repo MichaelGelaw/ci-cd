@@ -13,6 +13,7 @@ from src.executor import CommandExecutor
 from src.heartbeat import HeartbeatSender
 from src.lease_renewer import LeaseRenewer
 from src.artifact_collector import ArtifactCollector
+from src.logging_config import set_log_context, clear_log_context
 
 logger = logging.getLogger("worker")
 
@@ -37,6 +38,7 @@ class Worker:
             interval_seconds=self.config.heartbeat_interval_seconds,
             status_provider=lambda: self.current_status,
         )
+        set_log_context(worker_id=self.config.worker_id)
 
     def register(self) -> bool:
         try:
@@ -85,10 +87,18 @@ class Worker:
         if not job_id:
             return False
 
-        self._process_job(job_id)
+        trace_id = message.get("traceId") or message.get("correlationId") or job_id
+        self._process_job(job_id, trace_id=trace_id)
         return True
 
-    def _process_job(self, job_id: str) -> None:
+    def _process_job(self, job_id: str, trace_id: Optional[str] = None) -> None:
+        set_log_context(job_id=job_id, trace_id=trace_id or job_id, worker_id=self.config.worker_id)
+        try:
+            self._execute_job(job_id)
+        finally:
+            clear_log_context()
+
+    def _execute_job(self, job_id: str) -> None:
         logger.info(f"Worker {self.config.worker_id} claimed job {job_id}")
 
         job = self.api.get_job(job_id)

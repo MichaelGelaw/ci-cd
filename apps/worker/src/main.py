@@ -1,16 +1,12 @@
-import logging
 import signal
 import sys
 from src.worker import Worker
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] [%(levelname)s] %(message)s",
-)
+from src.logging_config import configure_logging
 
 
 def main():
     worker = Worker()
+    configure_logging(worker_id=worker.config.worker_id)
 
     def handle_signal(sig, frame):
         worker.stop()

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fastify from 'fastify';
 import type { FastifyInstance, FastifyServerOptions } from 'fastify';
 import multipart from '@fastify/multipart';
@@ -10,20 +11,52 @@ import { artifactRoutes } from './routes/artifacts.js';
 import { repositoryRoutes } from './routes/repositories.js';
 import { webhookRoutes } from './routes/webhooks.js';
 import { statsRoutes } from './routes/stats.js';
+import { metricsRoutes } from './routes/metrics.js';
+import { recordHttpRequest } from './metrics.js';
 
 export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
-  const app = fastify(opts);
+  const app = fastify({
+    requestIdHeader: 'x-request-id',
+    genReqId: (req) => {
+      const headerVal = req.headers['x-request-id'];
+      if (typeof headerVal === 'string' && headerVal.trim() !== '') {
+        return headerVal.trim();
+      }
+      return randomUUID();
+    },
+    ...opts,
+  });
 
   // Enable CORS for dashboard and browser clients
   app.addHook('onRequest', async (req, reply) => {
+    (req as any).startTime = process.hrtime();
     reply.header('Access-Control-Allow-Origin', '*');
     reply.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     reply.header(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, X-Hub-Signature-256, X-GitHub-Event, X-Artifact-Name, X-Artifact-Path',
+      'Content-Type, Authorization, X-Hub-Signature-256, X-GitHub-Event, X-Artifact-Name, X-Artifact-Path, X-Request-Id',
     );
+    reply.header('Access-Control-Expose-Headers', 'X-Request-Id');
     if (req.method === 'OPTIONS') {
       reply.status(200).send();
+    }
+  });
+
+  // Echo request id in response headers
+  app.addHook('onSend', async (request, reply) => {
+    if (request.id) {
+      reply.header('x-request-id', request.id);
+    }
+  });
+
+  // Record Prometheus HTTP metrics
+  app.addHook('onResponse', async (request, reply) => {
+    const startTime = (request as any).startTime;
+    if (startTime) {
+      const diff = process.hrtime(startTime);
+      const durationSeconds = diff[0] + diff[1] / 1e9;
+      const route = request.routeOptions?.url || request.url.split('?')[0];
+      recordHttpRequest(request.method, route, reply.statusCode, durationSeconds);
     }
   });
 
@@ -102,6 +135,7 @@ export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
   app.register(repositoryRoutes);
   app.register(webhookRoutes);
   app.register(statsRoutes);
+  app.register(metricsRoutes);
 
   return app;
 }
