@@ -172,6 +172,7 @@ export async function executeWorkflow(
         timeoutSeconds: step.timeout_seconds ?? null,
         status: 'created',
         retryPolicy,
+        artifacts: step.artifacts,
       });
       dbJobIds.push(jobRecord.id);
     }

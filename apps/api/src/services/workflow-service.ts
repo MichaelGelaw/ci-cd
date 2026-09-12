@@ -44,6 +44,7 @@ export async function submitWorkflow(
       timeoutSeconds: step.timeout_seconds ?? null,
       status: 'queued',
       retryPolicy,
+      artifacts: step.artifacts,
     });
 
     await enqueueJob({
