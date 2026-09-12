@@ -1,10 +1,19 @@
-// Workflow definition -- parsed from YAML workflow files.
+export interface RetryPolicy {
+  max_attempts?: number;
+  base_delay_seconds?: number;
+  max_delay_seconds?: number;
+  backoff_factor?: number;
+  jitter?: boolean;
+  retry_on_timeout?: boolean;
+}
 
 export interface StepDefinition {
   name?: string;
   run: string;
   image?: string;
   timeout_seconds?: number;
+  retries?: number;
+  retry?: RetryPolicy;
 }
 
 export interface WorkflowDefinition {
@@ -94,6 +103,8 @@ export interface JobRecord {
   lease_token: string | null;
   lease_expires_at: string | null;
   lease_duration_seconds: number | null;
+  retry_policy: RetryPolicy;
+  next_retry_at: string | null;
   created_at: string;
 }
 

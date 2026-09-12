@@ -23,6 +23,10 @@ import {
   releaseJobLease,
   findExpiredLeases,
   LeaseConflictError,
+  findDueRetryingJobs,
+  requeueJobForRetry,
+  calculateRetryDelay,
+  isFailureRetryable,
   getPool,
 } from '../src/index.js';
 
@@ -317,5 +321,109 @@ describe('Database Repository', () => {
     expect(released.lease_token).toBeNull();
     expect(released.lease_expires_at).toBeNull();
   });
+
+  it('calculates exponential backoff delay and evaluates retry eligibility', () => {
+    // Attempt 1: base delay * 2^0 = 2s (without jitter)
+    const delay1 = calculateRetryDelay(1, {
+      base_delay_seconds: 2,
+      backoff_factor: 2,
+      jitter: false,
+    });
+    expect(delay1).toBe(2);
+
+    // Attempt 2: base delay * 2^1 = 4s
+    const delay2 = calculateRetryDelay(2, {
+      base_delay_seconds: 2,
+      backoff_factor: 2,
+      jitter: false,
+    });
+    expect(delay2).toBe(4);
+
+    // Attempt 3: base delay * 2^2 = 8s
+    const delay3 = calculateRetryDelay(3, {
+      base_delay_seconds: 2,
+      backoff_factor: 2,
+      jitter: false,
+    });
+    expect(delay3).toBe(8);
+
+    // Capped at max_delay_seconds
+    const cappedDelay = calculateRetryDelay(10, {
+      base_delay_seconds: 2,
+      max_delay_seconds: 15,
+      jitter: false,
+    });
+    expect(cappedDelay).toBe(15);
+
+    // With jitter enabled, delay is >= base delay
+    const delayWithJitter = calculateRetryDelay(2, {
+      base_delay_seconds: 2,
+      jitter: true,
+    });
+    expect(delayWithJitter).toBeGreaterThanOrEqual(4);
+
+    // Failure retryability
+    expect(isFailureRetryable('failed')).toBe(true);
+    expect(isFailureRetryable('timed_out', { retry_on_timeout: true })).toBe(true);
+    expect(isFailureRetryable('timed_out', { retry_on_timeout: false })).toBe(false);
+    expect(isFailureRetryable('cancelled')).toBe(false);
+    expect(isFailureRetryable('succeeded')).toBe(false);
+  });
+
+  it('persists retry policy and manages retrying lifecycle with atomic requeue', async () => {
+    const run = await createWorkflowRun('retry-lifecycle-workflow', 'running');
+
+    const job = await createJob({
+      workflowRunId: run.id,
+      name: 'flaky-step',
+      command: 'exit 1',
+      retryPolicy: {
+        max_attempts: 3,
+        base_delay_seconds: 5,
+        backoff_factor: 2,
+        jitter: false,
+      },
+    });
+
+    expect(job.max_attempts).toBe(3);
+    expect(job.attempt).toBe(1);
+    expect(job.status).toBe('created');
+    expect(job.retry_policy).toEqual({
+      max_attempts: 3,
+      base_delay_seconds: 5,
+      backoff_factor: 2,
+      jitter: false,
+    });
+
+    // Move to queued -> assigned -> running
+    await updateJobStatus(job.id, 'queued');
+    await assignJobToWorker(job.id, 'worker-retry-test', 30);
+    await updateJobStatus(job.id, 'running');
+
+    // Simulate failure: transitions running -> failed -> retrying
+    await updateJobStatus(job.id, 'failed', { exitCode: 1 });
+
+    const nextRetry = new Date(Date.now() - 5000); // 5 seconds in the past so it's due
+    const retryingJob = await updateJobStatus(job.id, 'retrying', {
+      nextRetryAt: nextRetry,
+    });
+    expect(retryingJob.status).toBe('retrying');
+    expect(retryingJob.lease_token).toBeNull();
+    expect(retryingJob.next_retry_at).toBeTruthy();
+
+    // Query due retries
+    const dueJobs = await findDueRetryingJobs();
+    expect(dueJobs.some((j) => j.id === job.id)).toBe(true);
+
+    // Atomically requeue for retry
+    const requeuedJob = await requeueJobForRetry(job.id);
+    expect(requeuedJob.status).toBe('queued');
+    expect(requeuedJob.attempt).toBe(2);
+    expect(requeuedJob.max_attempts).toBe(3);
+    expect(requeuedJob.worker_id).toBeNull();
+    expect(requeuedJob.next_retry_at).toBeNull();
+    expect(requeuedJob.exit_code).toBeNull();
+  });
 });
+
 

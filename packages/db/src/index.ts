@@ -27,5 +27,9 @@ export {
   renewJobLease,
   releaseJobLease,
   findExpiredLeases,
+  findDueRetryingJobs,
+  requeueJobForRetry,
 } from './repository.js';
+export { calculateRetryDelay, isFailureRetryable } from './retry.js';
+
 

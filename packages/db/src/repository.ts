@@ -6,6 +6,7 @@ import type {
   RunStatus,
   WorkerRecord,
   WorkerStatus,
+  RetryPolicy,
 } from '@mini-ci/types';
 import { randomUUID } from 'node:crypto';
 import { getPool } from './connection.js';
@@ -75,7 +76,8 @@ export async function updateWorkflowRun(
     return existing;
   }
 
-  const query = `
+  const { rows } = await pool.query<WorkflowRunRecord>(
+    `
     UPDATE workflow_runs
     SET ${setClauses.join(', ')}
     WHERE id = $1
@@ -88,12 +90,14 @@ export async function updateWorkflowRun(
       duration_ms,
       error,
       created_at::text;
-  `;
+    `,
+    values,
+  );
 
-  const { rows } = await pool.query<WorkflowRunRecord>(query, values);
   if (rows.length === 0) {
     throw new Error(`Workflow run ${id} not found`);
   }
+
   return rows[0]!;
 }
 
@@ -152,8 +156,12 @@ export async function createJob(params: {
   priority?: number;
   maxAttempts?: number;
   status?: JobStatus;
+  retryPolicy?: RetryPolicy;
 }): Promise<JobRecord> {
   const pool = getPool();
+  const retryPolicy = params.retryPolicy ?? {};
+  const maxAttempts = params.retryPolicy?.max_attempts ?? params.maxAttempts ?? 1;
+
   const { rows } = await pool.query<JobRecord>(
     `
     INSERT INTO jobs (
@@ -164,9 +172,10 @@ export async function createJob(params: {
       timeout_seconds,
       priority,
       max_attempts,
-      status
+      status,
+      retry_policy
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     RETURNING
       id,
       workflow_run_id,
@@ -189,6 +198,8 @@ export async function createJob(params: {
       lease_token,
       lease_expires_at::text,
       lease_duration_seconds,
+      retry_policy,
+      next_retry_at::text,
       created_at::text;
     `,
     [
@@ -198,8 +209,9 @@ export async function createJob(params: {
       params.image ?? null,
       params.timeoutSeconds ?? null,
       params.priority ?? 0,
-      params.maxAttempts ?? 1,
+      maxAttempts,
       params.status ?? 'created',
+      JSON.stringify(retryPolicy),
     ],
   );
 
@@ -232,6 +244,8 @@ export async function getJob(id: string): Promise<JobRecord | null> {
       lease_token,
       lease_expires_at::text,
       lease_duration_seconds,
+      retry_policy,
+      next_retry_at::text,
       created_at::text
     FROM jobs
     WHERE id = $1;
@@ -267,6 +281,8 @@ export async function getJobsByWorkflowRun(workflowRunId: string): Promise<JobRe
       lease_token,
       lease_expires_at::text,
       lease_duration_seconds,
+      retry_policy,
+      next_retry_at::text,
       created_at::text
     FROM jobs
     WHERE workflow_run_id = $1
@@ -303,6 +319,8 @@ export async function listQueuedJobs(limit: number = 100): Promise<JobRecord[]> 
       lease_token,
       lease_expires_at::text,
       lease_duration_seconds,
+      retry_policy,
+      next_retry_at::text,
       created_at::text
     FROM jobs
     WHERE status = 'queued'
@@ -365,6 +383,8 @@ export async function updateJobStatus(
     leaseToken?: string | null;
     leaseExpiresAt?: Date | string | null;
     leaseDurationSeconds?: number | null;
+    nextRetryAt?: Date | string | null;
+    retryPolicy?: RetryPolicy;
   } = {},
 ): Promise<JobRecord> {
   const pool = getPool();
@@ -425,19 +445,29 @@ export async function updateJobStatus(
     if (updates.leaseToken !== undefined) {
       setClauses.push(`lease_token = $${paramIndex++}`);
       values.push(updates.leaseToken);
-    } else if (['succeeded', 'failed', 'cancelled', 'timed_out'].includes(nextStatus)) {
-      // Clear lease on terminal states
+    } else if (['succeeded', 'failed', 'cancelled', 'timed_out', 'retrying'].includes(nextStatus)) {
+      // Clear lease on terminal states or when retrying
       setClauses.push('lease_token = NULL');
     }
     if (updates.leaseExpiresAt !== undefined) {
       setClauses.push(`lease_expires_at = $${paramIndex++}`);
       values.push(updates.leaseExpiresAt);
-    } else if (['succeeded', 'failed', 'cancelled', 'timed_out'].includes(nextStatus)) {
+    } else if (['succeeded', 'failed', 'cancelled', 'timed_out', 'retrying'].includes(nextStatus)) {
       setClauses.push('lease_expires_at = NULL');
     }
     if (updates.leaseDurationSeconds !== undefined) {
       setClauses.push(`lease_duration_seconds = $${paramIndex++}`);
       values.push(updates.leaseDurationSeconds);
+    }
+    if (updates.nextRetryAt !== undefined) {
+      setClauses.push(`next_retry_at = $${paramIndex++}`);
+      values.push(updates.nextRetryAt);
+    } else if (['succeeded', 'failed', 'cancelled'].includes(nextStatus)) {
+      setClauses.push('next_retry_at = NULL');
+    }
+    if (updates.retryPolicy !== undefined) {
+      setClauses.push(`retry_policy = $${paramIndex++}`);
+      values.push(JSON.stringify(updates.retryPolicy));
     }
 
     const updateQuery = `
@@ -466,6 +496,8 @@ export async function updateJobStatus(
         lease_token,
         lease_expires_at::text,
         lease_duration_seconds,
+        retry_policy,
+        next_retry_at::text,
         created_at::text;
     `;
 
@@ -519,6 +551,8 @@ export async function grantJobLease(
       lease_token,
       lease_expires_at::text,
       lease_duration_seconds,
+      retry_policy,
+      next_retry_at::text,
       created_at::text;
     `,
     [jobId, workerId, leaseToken, expiresAt, durationSeconds],
@@ -611,6 +645,8 @@ export async function renewJobLease(
         lease_token,
         lease_expires_at::text,
         lease_duration_seconds,
+        retry_policy,
+        next_retry_at::text,
         created_at::text;
       `,
       [jobId, durationSeconds],
@@ -685,6 +721,8 @@ export async function releaseJobLease(
         lease_token,
         lease_expires_at::text,
         lease_duration_seconds,
+        retry_policy,
+        next_retry_at::text,
         created_at::text;
       `,
       [jobId],
@@ -728,6 +766,8 @@ export async function findExpiredLeases(
       lease_token,
       lease_expires_at::text,
       lease_duration_seconds,
+      retry_policy,
+      next_retry_at::text,
       created_at::text
     FROM jobs
     WHERE status IN ('assigned', 'running')
@@ -738,6 +778,120 @@ export async function findExpiredLeases(
     [gracePeriodSeconds],
   );
   return rows;
+}
+
+export async function findDueRetryingJobs(limit: number = 100): Promise<JobRecord[]> {
+  const pool = getPool();
+  const { rows } = await pool.query<JobRecord>(
+    `
+    SELECT
+      id,
+      workflow_run_id,
+      name,
+      command,
+      image,
+      status,
+      priority,
+      attempt,
+      max_attempts,
+      worker_id,
+      exit_code,
+      stdout,
+      stderr,
+      error,
+      timeout_seconds,
+      started_at::text,
+      finished_at::text,
+      duration_ms,
+      lease_token,
+      lease_expires_at::text,
+      lease_duration_seconds,
+      retry_policy,
+      next_retry_at::text,
+      created_at::text
+    FROM jobs
+    WHERE status = 'retrying'
+      AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+    ORDER BY next_retry_at ASC NULLS FIRST, priority DESC, created_at ASC
+    LIMIT $1;
+    `,
+    [limit],
+  );
+  return rows;
+}
+
+export async function requeueJobForRetry(jobId: string): Promise<JobRecord> {
+  const pool = getPool();
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const { rows: existingRows } = await client.query<{ status: JobStatus }>(
+      'SELECT status FROM jobs WHERE id = $1 FOR UPDATE;',
+      [jobId],
+    );
+
+    if (existingRows.length === 0) {
+      throw new Error(`Job ${jobId} not found`);
+    }
+
+    const currentStatus = existingRows[0]!.status;
+    assertValidTransition(currentStatus, 'queued');
+
+    const { rows: updatedRows } = await client.query<JobRecord>(
+      `
+      UPDATE jobs
+      SET
+        status = 'queued',
+        attempt = attempt + 1,
+        worker_id = NULL,
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        next_retry_at = NULL,
+        exit_code = NULL,
+        error = NULL,
+        started_at = NULL,
+        finished_at = NULL,
+        duration_ms = NULL
+      WHERE id = $1
+      RETURNING
+        id,
+        workflow_run_id,
+        name,
+        command,
+        image,
+        status,
+        priority,
+        attempt,
+        max_attempts,
+        worker_id,
+        exit_code,
+        stdout,
+        stderr,
+        error,
+        timeout_seconds,
+        started_at::text,
+        finished_at::text,
+        duration_ms,
+        lease_token,
+        lease_expires_at::text,
+        lease_duration_seconds,
+        retry_policy,
+        next_retry_at::text,
+        created_at::text;
+      `,
+      [jobId],
+    );
+
+    await client.query('COMMIT');
+    return updatedRows[0]!;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function recordJobAttempt(params: {

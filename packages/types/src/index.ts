@@ -17,4 +17,6 @@ export type {
   WorkerHeartbeatRequest,
   RenewLeaseRequest,
   RenewLeaseResponse,
+  RetryPolicy,
 } from './workflow.js';
+
