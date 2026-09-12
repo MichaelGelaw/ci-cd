@@ -42,10 +42,11 @@ export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
     }
   });
 
-  // In-memory sliding-window rate limiter
+  // In-memory sliding-window rate limiter with periodic cleanup
   const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
   const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX || '1000', 10);
   const rateLimitWindowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10);
+  let lastRateLimitCleanup = Date.now();
 
   app.addHook('onRequest', async (req, reply) => {
     if (req.method === 'OPTIONS') {
@@ -54,6 +55,17 @@ export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
 
     const ip = req.ip || '127.0.0.1';
     const now = Date.now();
+
+    // Evict expired entries if interval elapsed or map grows large
+    if (now - lastRateLimitCleanup > rateLimitWindowMs || rateLimitStore.size > 5000) {
+      lastRateLimitCleanup = now;
+      for (const [k, v] of rateLimitStore.entries()) {
+        if (now > v.resetAt) {
+          rateLimitStore.delete(k);
+        }
+      }
+    }
+
     let clientLimit = rateLimitStore.get(ip);
 
     if (!clientLimit || now > clientLimit.resetAt) {

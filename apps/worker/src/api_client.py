@@ -9,14 +9,28 @@ class LeaseConflictError(Exception):
 
 
 class ApiClient:
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, api_key: Optional[str] = None):
         self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
 
     def close(self) -> None:
         pass
 
+    def _get_headers(self, extra: Optional[Dict[str, str]] = None) -> Optional[Dict[str, str]]:
+        headers: Dict[str, str] = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+            headers["x-api-key"] = self.api_key
+        if extra:
+            headers.update(extra)
+        return headers if headers else None
+
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
-        resp = requests.get(f"{self.base_url}/jobs/{job_id}", timeout=10)
+        headers = self._get_headers()
+        kwargs: Dict[str, Any] = {"timeout": 10}
+        if headers:
+            kwargs["headers"] = headers
+        resp = requests.get(f"{self.base_url}/jobs/{job_id}", **kwargs)
         if resp.status_code == 200:
             return resp.json().get("job")
         return None
@@ -46,10 +60,14 @@ class ApiClient:
         if duration_ms is not None:
             payload["duration_ms"] = duration_ms
 
+        headers = self._get_headers()
+        kwargs: Dict[str, Any] = {"json": payload, "timeout": 10}
+        if headers:
+            kwargs["headers"] = headers
+
         resp = requests.post(
             f"{self.base_url}/jobs/{job_id}/status",
-            json=payload,
-            timeout=10,
+            **kwargs,
         )
         resp.raise_for_status()
         return resp.json()
@@ -73,10 +91,14 @@ class ApiClient:
         if metadata is not None:
             payload["metadata"] = metadata
 
+        headers = self._get_headers()
+        kwargs: Dict[str, Any] = {"json": payload, "timeout": 10}
+        if headers:
+            kwargs["headers"] = headers
+
         resp = requests.post(
             f"{self.base_url}/workers/register",
-            json=payload,
-            timeout=10,
+            **kwargs,
         )
         resp.raise_for_status()
         return resp.json()
@@ -90,10 +112,14 @@ class ApiClient:
         if status is not None:
             payload["status"] = status
 
+        headers = self._get_headers()
+        kwargs: Dict[str, Any] = {"json": payload, "timeout": 10}
+        if headers:
+            kwargs["headers"] = headers
+
         resp = requests.post(
             f"{self.base_url}/workers/{worker_id}/heartbeat",
-            json=payload,
-            timeout=10,
+            **kwargs,
         )
         resp.raise_for_status()
         return resp.json()
@@ -108,10 +134,14 @@ class ApiClient:
             "lease_token": lease_token,
             "duration_seconds": duration_seconds,
         }
+        headers = self._get_headers()
+        kwargs: Dict[str, Any] = {"json": payload, "timeout": 10}
+        if headers:
+            kwargs["headers"] = headers
+
         resp = requests.post(
             f"{self.base_url}/jobs/{job_id}/lease/renew",
-            json=payload,
-            timeout=10,
+            **kwargs,
         )
         if resp.status_code == 409:
             err_data = resp.json().get("error", {})
@@ -132,12 +162,14 @@ class ApiClient:
         filename = name or os.path.basename(file_path)
         relpath = logical_path or filename
 
-        headers = {
+        extra_headers = {
             "x-artifact-name": filename,
             "x-artifact-path": relpath,
         }
         if mime_type:
-            headers["Content-Type"] = mime_type
+            extra_headers["Content-Type"] = mime_type
+
+        headers = self._get_headers(extra_headers)
 
         with open(file_path, "rb") as f:
             resp = requests.post(url, data=f, headers=headers, timeout=60)

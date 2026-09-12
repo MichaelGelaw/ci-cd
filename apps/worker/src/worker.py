@@ -28,7 +28,7 @@ class Worker:
             queue_key=queue_key,
             processing_key=processing_key,
         )
-        self.api = ApiClient(self.config.api_url)
+        self.api = ApiClient(self.config.api_url, api_key=self.config.api_key)
         self.running = False
         self.is_registered = False
         self.current_status = "ready"
@@ -295,6 +295,18 @@ class Worker:
                         )
                     else:
                         logger.error(f"Failed to report final status for job {job_id}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error executing job {job_id}: {e}")
+            if cancellation_event and not cancellation_event.is_set():
+                try:
+                    self.api.update_job_status(
+                        job_id=job_id,
+                        status="failed",
+                        worker_id=self.config.worker_id,
+                        error=f"Execution worker error: {e}",
+                    )
+                except Exception as report_err:
+                    logger.warning(f"Could not report failure for crashed job {job_id}: {report_err}")
         finally:
             self.current_cancellation_event = None
             if cancel_pubsub:

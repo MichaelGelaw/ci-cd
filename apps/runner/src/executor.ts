@@ -38,7 +38,11 @@ interface StepOutput {
 
 function killProcessTree(pid: number): void {
   try {
-    process.kill(-pid, 'SIGKILL');
+    if (process.platform === 'win32') {
+      process.kill(pid, 'SIGKILL');
+    } else {
+      process.kill(-pid, 'SIGKILL');
+    }
   } catch {
     // Process may have already exited.
   }

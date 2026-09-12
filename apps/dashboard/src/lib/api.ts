@@ -8,6 +8,7 @@ import type {
   ArtifactRecord,
   LogChunk,
   LogEndEvent,
+  LogEvent,
 } from '@mini-ci/types';
 
 export const API_BASE =
@@ -78,10 +79,17 @@ export async function cancelJob(id: string, reason?: string): Promise<void> {
   });
 }
 
-export async function getJobLogs(
-  id: string,
-): Promise<{ jobId: string; logs: string[]; live: boolean }> {
-  return request<{ jobId: string; logs: string[]; live: boolean }>(`/jobs/${id}/logs`);
+export interface JobLogsResponse {
+  jobId: string;
+  status: string;
+  stdout: string;
+  stderr: string;
+  events: LogEvent[];
+  count: number;
+}
+
+export async function getJobLogs(id: string): Promise<JobLogsResponse> {
+  return request<JobLogsResponse>(`/jobs/${id}/logs`);
 }
 
 export async function listWorkers(

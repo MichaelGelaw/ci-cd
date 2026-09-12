@@ -305,6 +305,9 @@ class CommandExecutor:
             command,
         ])
 
+        if container_name:
+            _cleanup_container(container_name)
+
         try:
             start_session = True if sys.platform != "win32" else False
             proc = subprocess.Popen(

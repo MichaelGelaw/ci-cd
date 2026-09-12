@@ -162,21 +162,25 @@ export async function dequeueJobForWorker(
 export async function acknowledgeWorkerJob(workerId: string, jobId: string): Promise<boolean> {
   const redis = getRedisClient();
   const processingKey = getWorkerProcessingKey(workerId);
-  const items = await redis.lrange(processingKey, 0, -1);
-
-  for (const item of items) {
-    try {
-      const parsed = JSON.parse(item) as JobQueueMessage;
-      if (parsed.jobId === jobId) {
-        await redis.lrem(processingKey, 1, item);
-        return true;
+  try {
+    const result = await redis.eval(ACKNOWLEDGE_LUA, 1, processingKey, jobId);
+    return result === 1;
+  } catch {
+    const items = await redis.lrange(processingKey, 0, -1);
+    for (const item of items) {
+      try {
+        const parsed = JSON.parse(item) as JobQueueMessage;
+        const jid = parsed.jobId || (parsed as unknown as { job_id?: string }).job_id;
+        if (jid === jobId) {
+          await redis.lrem(processingKey, 1, item);
+          return true;
+        }
+      } catch {
+        // Ignore unparseable
       }
-    } catch {
-      // Ignore unparseable
     }
+    return false;
   }
-
-  return false;
 }
 
 export async function getWorkerQueueLength(workerId: string): Promise<number> {

@@ -25,3 +25,4 @@ class WorkerConfig:
     queue_key: Optional[str] = field(default_factory=lambda: os.getenv("WORKER_QUEUE", None))
     heartbeat_interval_seconds: int = field(default_factory=lambda: int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "5")))
     log_ttl_seconds: int = field(default_factory=lambda: int(os.getenv("LOG_TTL_SECONDS", "86400")))
+    api_key: Optional[str] = field(default_factory=lambda: os.getenv("MINI_CI_API_KEY") or os.getenv("API_KEY", None))

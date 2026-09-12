@@ -30,20 +30,43 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
       const [jobData, artifactsData, initialLogs] = await Promise.all([
         getJob(jobId),
         getJobArtifacts(jobId).catch(() => ({ artifacts: [] })),
-        getJobLogs(jobId).catch(() => ({ logs: [] })),
+        getJobLogs(jobId).catch(() => ({ jobId, status: '', stdout: '', stderr: '', events: [], count: 0 })),
       ]);
 
       setJob(jobData.job);
       setArtifacts(artifactsData.artifacts || []);
 
-      if (initialLogs.logs && initialLogs.logs.length > 0) {
-        setLogs(
-          initialLogs.logs.map((line: string) => ({
-            text: line,
-            stream: 'stdout',
-            ts: new Date().toLocaleTimeString(),
-          })),
-        );
+      if (initialLogs) {
+        const loadedLogs: Array<{ text: string; stream: 'stdout' | 'stderr'; ts: string }> = [];
+        if (initialLogs.events && initialLogs.events.length > 0) {
+          for (const ev of initialLogs.events) {
+            if ('stream' in ev && ev.data !== undefined) {
+              loadedLogs.push({
+                text: ev.data,
+                stream: ev.stream || 'stdout',
+                ts: ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString(),
+              });
+            }
+          }
+        } else {
+          if (initialLogs.stdout) {
+            for (const line of initialLogs.stdout.split('\n')) {
+              if (line) {
+                loadedLogs.push({ text: line, stream: 'stdout', ts: new Date().toLocaleTimeString() });
+              }
+            }
+          }
+          if (initialLogs.stderr) {
+            for (const line of initialLogs.stderr.split('\n')) {
+              if (line) {
+                loadedLogs.push({ text: line, stream: 'stderr', ts: new Date().toLocaleTimeString() });
+              }
+            }
+          }
+        }
+        if (loadedLogs.length > 0) {
+          setLogs(loadedLogs);
+        }
       }
       setError(null);
     } catch (err) {
