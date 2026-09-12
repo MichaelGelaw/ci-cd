@@ -4,13 +4,16 @@ import { parseWorkflowFile } from './parser.js';
 import { executeWorkflow } from './executor.js';
 import { printResult, printJson } from './reporter.js';
 
+import type { ExecuteOptions } from './executor.js';
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const jsonMode = args.includes('--json');
+  const forceShell = args.includes('--shell');
   const filePath = args.find((a) => !a.startsWith('--'));
 
   if (!filePath) {
-    console.error('Usage: mini-ci <workflow.yml> [--json]');
+    console.error('Usage: mini-ci <workflow.yml> [--json] [--shell]');
     process.exit(1);
   }
 
@@ -24,7 +27,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const result = await executeWorkflow(workflow);
+  const options: ExecuteOptions = {};
+  if (forceShell) {
+    options.mode = 'shell';
+  }
+
+  const result = await executeWorkflow(workflow, options);
 
   if (jsonMode) {
     printJson(result);

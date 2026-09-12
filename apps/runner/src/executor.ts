@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import type {
   WorkflowDefinition,
@@ -7,54 +10,46 @@ import type {
   StepStatus,
 } from '@mini-ci/types';
 
-interface ExecuteOptions {
+import { runStepInDocker } from './docker-runner.js';
+
+export interface ExecuteOptions {
+  mode?: 'shell' | 'docker';
   shell?: string;
 }
 
-const isWindows = process.platform === 'win32';
+interface StepOutput {
+  exit_code: number | null;
+  stdout: string;
+  stderr: string;
+  error?: string;
+}
+
+// -- Shell runner (Milestone 1) -----------------------------------------------
 
 function killProcessTree(pid: number): void {
-  if (isWindows) {
-    // On Windows, SIGTERM does not propagate to child processes.
-    // taskkill /T kills the entire process tree.
-    spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
-  } else {
-    try {
-      // Kill the process group on Unix.
-      process.kill(-pid, 'SIGKILL');
-    } catch {
-      // Process may have already exited.
-    }
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    // Process may have already exited.
   }
 }
 
-function runStep(
+function runStepShell(
   command: string,
   timeoutMs: number | undefined,
-  options: ExecuteOptions,
-): Promise<{ exit_code: number | null; stdout: string; stderr: string; error?: string }> {
+  shell: string | boolean,
+): Promise<StepOutput> {
   return new Promise((resolve) => {
-    const useShell = options.shell ?? true;
-    const spawnOptions: {
-      shell: boolean | string;
-      stdio: ['ignore', 'pipe', 'pipe'];
-      detached?: boolean;
-    } = {
-      shell: useShell,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    };
-
-    // On Unix, detach so we can kill the process group.
-    if (!isWindows) {
-      spawnOptions.detached = true;
-    }
-
     let stdout = '';
     let stderr = '';
     let killed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
-    const child = spawn(command, [], spawnOptions);
+    const child = spawn(command, [], {
+      shell,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    });
 
     child.stdout.on('data', (chunk: Buffer) => {
       stdout += chunk.toString();
@@ -98,69 +93,108 @@ function runStep(
   });
 }
 
+// -- Workflow executor --------------------------------------------------------
+
 export async function executeWorkflow(
   workflow: WorkflowDefinition,
   options: ExecuteOptions = {},
 ): Promise<WorkflowResult> {
+  const mode = options.mode ?? (workflow.image ? 'docker' : 'shell');
   const workflowStart = new Date();
   const results: StepResult[] = [];
   let failed = false;
 
-  for (let i = 0; i < workflow.steps.length; i++) {
-    const step = workflow.steps[i]!;
-    const stepName = step.name ?? `Step ${i + 1}`;
+  // Create a temporary workspace for Docker mode.
+  let workspaceDir: string | undefined;
+  if (mode === 'docker') {
+    workspaceDir = await mkdtemp(join(tmpdir(), 'mini-ci-'));
+  }
 
-    if (failed) {
-      results.push({
+  try {
+    for (let i = 0; i < workflow.steps.length; i++) {
+      const step = workflow.steps[i]!;
+      const stepName = step.name ?? `Step ${i + 1}`;
+
+      if (failed) {
+        results.push({
+          index: i,
+          name: stepName,
+          command: step.run,
+          status: 'skipped',
+          exit_code: null,
+          stdout: '',
+          stderr: '',
+          started_at: new Date().toISOString(),
+          finished_at: new Date().toISOString(),
+          duration_ms: 0,
+        });
+        continue;
+      }
+
+      const stepStart = new Date();
+      const timeoutMs = step.timeout_seconds ? step.timeout_seconds * 1000 : undefined;
+
+      let result: StepOutput;
+
+      if (mode === 'docker') {
+        // Step-level image overrides workflow-level image.
+        const image = step.image ?? workflow.image;
+        if (!image) {
+          result = {
+            exit_code: null,
+            stdout: '',
+            stderr: '',
+            error: 'No Docker image specified for step or workflow',
+          };
+        } else {
+          result = await runStepInDocker(image, step.run, workspaceDir!, timeoutMs);
+        }
+      } else {
+        result = await runStepShell(step.run, timeoutMs, options.shell ?? true);
+      }
+
+      const stepEnd = new Date();
+
+      let status: StepStatus;
+      if (result.error) {
+        status = 'failed';
+      } else if (result.exit_code === 0) {
+        status = 'success';
+      } else {
+        status = 'failed';
+      }
+
+      const stepResult: StepResult = {
         index: i,
         name: stepName,
         command: step.run,
-        status: 'skipped',
-        exit_code: null,
-        stdout: '',
-        stderr: '',
-        started_at: new Date().toISOString(),
-        finished_at: new Date().toISOString(),
-        duration_ms: 0,
-      });
-      continue;
+        status,
+        exit_code: result.exit_code,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        started_at: stepStart.toISOString(),
+        finished_at: stepEnd.toISOString(),
+        duration_ms: stepEnd.getTime() - stepStart.getTime(),
+      };
+
+      if (result.error) {
+        stepResult.error = result.error;
+      }
+
+      results.push(stepResult);
+
+      if (status === 'failed') {
+        failed = true;
+      }
     }
-
-    const stepStart = new Date();
-    const timeoutMs = step.timeout_seconds ? step.timeout_seconds * 1000 : undefined;
-    const result = await runStep(step.run, timeoutMs, options);
-    const stepEnd = new Date();
-
-    let status: StepStatus;
-    if (result.error) {
-      status = 'failed';
-    } else if (result.exit_code === 0) {
-      status = 'success';
-    } else {
-      status = 'failed';
-    }
-
-    const stepResult: StepResult = {
-      index: i,
-      name: stepName,
-      command: step.run,
-      status,
-      exit_code: result.exit_code,
-      stdout: result.stdout,
-      stderr: result.stderr,
-      started_at: stepStart.toISOString(),
-      finished_at: stepEnd.toISOString(),
-      duration_ms: stepEnd.getTime() - stepStart.getTime(),
-    };
-
-    if (result.error) {
-      stepResult.error = result.error;
-    }
-
-    results.push(stepResult);
-
-    if (status === 'failed') {
-      failed = true;
+  } finally {
+    // Clean up workspace directory.
+    if (workspaceDir) {
+      try {
+        await rm(workspaceDir, { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup.
+      }
     }
   }
 
