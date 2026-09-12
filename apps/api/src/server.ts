@@ -1,18 +1,36 @@
 import fastify from 'fastify';
 import type { FastifyInstance, FastifyServerOptions } from 'fastify';
+import multipart from '@fastify/multipart';
 import { healthRoutes } from './routes/health.js';
 import { workflowRoutes } from './routes/workflows.js';
 import { jobRoutes } from './routes/jobs.js';
 import { workerRoutes } from './routes/workers.js';
 import { schedulerRoutes } from './routes/scheduler.js';
+import { artifactRoutes } from './routes/artifacts.js';
 
 export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
   const app = fastify(opts);
+
+  // Register multipart plugin for file uploads
+  app.register(multipart, {
+    limits: {
+      fileSize: 50 * 1024 * 1024, // 50MB
+    },
+  });
 
   // Accept raw YAML and plain text payloads
   app.addContentTypeParser(
     ['application/x-yaml', 'text/yaml', 'text/plain'],
     { parseAs: 'string' },
+    (_req, body, done) => {
+      done(null, body);
+    },
+  );
+
+  // Accept raw binary octet-stream payloads
+  app.addContentTypeParser(
+    'application/octet-stream',
+    { parseAs: 'buffer' },
     (_req, body, done) => {
       done(null, body);
     },
@@ -45,6 +63,7 @@ export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
   app.register(jobRoutes);
   app.register(workerRoutes);
   app.register(schedulerRoutes);
+  app.register(artifactRoutes);
 
   return app;
 }

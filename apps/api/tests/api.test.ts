@@ -1183,6 +1183,98 @@ steps:
       expect(getBody.jobs.every((j: any) => j.status === 'cancelled')).toBe(true);
     });
   });
+
+  describe('Artifacts API', () => {
+    it('uploads, lists, downloads, and deletes artifacts for jobs and workflow runs', async () => {
+      const submitRes = await app.inject({
+        method: 'POST',
+        url: '/workflows/runs',
+        payload: {
+          name: 'artifact-api-test',
+          steps: [{ name: 'build-step', run: 'echo building' }],
+        },
+      });
+
+      const { run, jobs } = submitRes.json();
+      const jobId = jobs[0].id;
+      const fileContent = 'Hello, this is a test artifact file content!';
+
+      // 1. Upload artifact via POST /jobs/:id/artifacts
+      const uploadRes = await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/artifacts`,
+        headers: {
+          'content-type': 'text/plain',
+          'x-artifact-name': 'output.txt',
+          'x-artifact-path': 'dist/output.txt',
+        },
+        payload: Buffer.from(fileContent, 'utf-8'),
+      });
+
+      expect(uploadRes.statusCode).toBe(201);
+      const uploadBody = uploadRes.json();
+      expect(uploadBody.artifact).toBeTruthy();
+      expect(uploadBody.artifact.name).toBe('output.txt');
+      expect(uploadBody.artifact.path).toBe('dist/output.txt');
+      expect(uploadBody.artifact.job_id).toBe(jobId);
+      expect(uploadBody.artifact.workflow_run_id).toBe(run.id);
+      expect(Number(uploadBody.artifact.size_bytes)).toBe(fileContent.length);
+      expect(uploadBody.artifact.checksum).toBeTruthy();
+      const artifactId = uploadBody.artifact.id;
+
+      // 2. Query artifacts by job: GET /jobs/:id/artifacts
+      const jobArtifactsRes = await app.inject({
+        method: 'GET',
+        url: `/jobs/${jobId}/artifacts`,
+      });
+      expect(jobArtifactsRes.statusCode).toBe(200);
+      const jobArtifacts = jobArtifactsRes.json();
+      expect(jobArtifacts.artifacts).toHaveLength(1);
+      expect(jobArtifacts.artifacts[0].id).toBe(artifactId);
+
+      // 3. Query artifacts by workflow run: GET /workflow-runs/:id/artifacts
+      const runArtifactsRes = await app.inject({
+        method: 'GET',
+        url: `/workflow-runs/${run.id}/artifacts`,
+      });
+      expect(runArtifactsRes.statusCode).toBe(200);
+      const runArtifacts = runArtifactsRes.json();
+      expect(runArtifacts.artifacts).toHaveLength(1);
+      expect(runArtifacts.artifacts[0].name).toBe('output.txt');
+
+      // 4. Query artifact metadata: GET /artifacts/:id
+      const detailsRes = await app.inject({
+        method: 'GET',
+        url: `/artifacts/${artifactId}`,
+      });
+      expect(detailsRes.statusCode).toBe(200);
+      expect(detailsRes.json().artifact.name).toBe('output.txt');
+
+      // 5. Download artifact content: GET /artifacts/:id/download
+      const downloadRes = await app.inject({
+        method: 'GET',
+        url: `/artifacts/${artifactId}/download`,
+      });
+      expect(downloadRes.statusCode).toBe(200);
+      expect(downloadRes.headers['content-disposition']).toContain('output.txt');
+      expect(downloadRes.body).toBe(fileContent);
+
+      // 6. Delete artifact: DELETE /artifacts/:id
+      const deleteRes = await app.inject({
+        method: 'DELETE',
+        url: `/artifacts/${artifactId}`,
+      });
+      expect(deleteRes.statusCode).toBe(200);
+      expect(deleteRes.json().success).toBe(true);
+
+      // 7. Verify 404 after deletion
+      const checkDeletedRes = await app.inject({
+        method: 'GET',
+        url: `/artifacts/${artifactId}`,
+      });
+      expect(checkDeletedRes.statusCode).toBe(404);
+    });
+  });
 });
 
 
