@@ -1,5 +1,7 @@
 import { runMigrations, closePool } from '@mini-ci/db';
 import { closeRedis } from '@mini-ci/queue';
+import { Scheduler } from '@mini-ci/scheduler';
+import { recoverStaleJobsService, dispatchDueRetries } from './services/job-service.js';
 import { buildServer } from './server.js';
 
 async function main(): Promise<void> {
@@ -28,8 +30,30 @@ async function main(): Promise<void> {
           },
   });
 
+  const autoScheduler = process.env['ENABLE_AUTO_SCHEDULER'] !== 'false';
+  let schedulerTimer: NodeJS.Timeout | null = null;
+
+  if (autoScheduler) {
+    const intervalMs = Number(process.env['SCHEDULER_INTERVAL_MS'] ?? 1000);
+    const scheduler = new Scheduler();
+    schedulerTimer = setInterval(async () => {
+      try {
+        await recoverStaleJobsService();
+        await dispatchDueRetries();
+        await scheduler.scheduleRound();
+      } catch {
+        // Ignore background scheduler errors
+      }
+    }, intervalMs);
+    console.log(`Automatic scheduler active (tick interval: ${intervalMs}ms)`);
+  }
+
   const stop = async (): Promise<void> => {
     console.log('Shutting down API server...');
+    if (schedulerTimer) {
+      clearInterval(schedulerTimer);
+      schedulerTimer = null;
+    }
     await app.close();
     await closePool();
     await closeRedis();
