@@ -18,8 +18,14 @@ import {
   touchWorkerHeartbeat,
   reapDeadWorkers,
   findStaleWorkers,
+  assignJobToWorker,
+  renewJobLease,
+  releaseJobLease,
+  findExpiredLeases,
+  LeaseConflictError,
   getPool,
 } from '../src/index.js';
+
 
 describe('Database Repository', () => {
   beforeAll(async () => {
@@ -238,4 +244,78 @@ describe('Database Repository', () => {
     const activeRecord = await getWorker(activeWorkerId);
     expect(activeRecord?.status).toBe('ready');
   });
+
+  it('assigns job with lease and renews valid lease', async () => {
+    const run = await createWorkflowRun('lease-test-workflow', 'running');
+    const job = await createJob({
+      workflowRunId: run.id,
+      name: 'lease-job-1',
+      command: 'echo "test"',
+    });
+    await updateJobStatus(job.id, 'queued');
+
+    // Assign job to worker
+    const assigned = await assignJobToWorker(job.id, 'worker-alpha', 30);
+    expect(assigned.status).toBe('assigned');
+    expect(assigned.worker_id).toBe('worker-alpha');
+    expect(assigned.lease_token).toBeTruthy();
+    expect(assigned.lease_expires_at).toBeTruthy();
+    expect(assigned.lease_duration_seconds).toBe(30);
+
+    const originalExpiresAt = new Date(assigned.lease_expires_at!).getTime();
+
+    // Transition to running preserves lease
+    const running = await updateJobStatus(job.id, 'running');
+    expect(running.lease_token).toBe(assigned.lease_token);
+
+    // Renew lease with valid token
+    const renewal = await renewJobLease(job.id, assigned.lease_token!, 60);
+    expect(renewal.job.lease_duration_seconds).toBe(60);
+    const renewedExpiresAt = new Date(renewal.leaseExpiresAt).getTime();
+    expect(renewedExpiresAt).toBeGreaterThan(originalExpiresAt);
+
+    // Renew with invalid token fails with LeaseConflictError
+    await expect(renewJobLease(job.id, 'invalid-token-12345', 30)).rejects.toThrow(
+      LeaseConflictError,
+    );
+
+    // Transition to succeeded automatically clears lease
+    const succeeded = await updateJobStatus(job.id, 'succeeded');
+    expect(succeeded.lease_token).toBeNull();
+    expect(succeeded.lease_expires_at).toBeNull();
+  });
+
+  it('detects expired leases and blocks renewal of expired lease', async () => {
+    const run = await createWorkflowRun('expired-lease-workflow', 'running');
+    const job = await createJob({
+      workflowRunId: run.id,
+      name: 'lease-job-expired',
+      command: 'echo "expired"',
+    });
+    await updateJobStatus(job.id, 'queued');
+
+    const assigned = await assignJobToWorker(job.id, 'worker-beta', 30);
+    const pool = getPool();
+
+    // Backdate lease_expires_at to the past
+    await pool.query(
+      "UPDATE jobs SET lease_expires_at = NOW() - INTERVAL '60 seconds' WHERE id = $1;",
+      [job.id],
+    );
+
+    // findExpiredLeases should find this job
+    const expiredList = await findExpiredLeases(0);
+    expect(expiredList.some((j) => j.id === job.id)).toBe(true);
+
+    // Renewing expired lease must fail with LeaseConflictError
+    await expect(renewJobLease(job.id, assigned.lease_token!, 30)).rejects.toThrow(
+      LeaseConflictError,
+    );
+
+    // Releasing the lease clears it
+    const released = await releaseJobLease(job.id, assigned.lease_token!);
+    expect(released.lease_token).toBeNull();
+    expect(released.lease_expires_at).toBeNull();
+  });
 });
+

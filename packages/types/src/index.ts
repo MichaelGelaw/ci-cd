@@ -15,4 +15,6 @@ export type {
   WorkerRecord,
   RegisterWorkerRequest,
   WorkerHeartbeatRequest,
+  RenewLeaseRequest,
+  RenewLeaseResponse,
 } from './workflow.js';

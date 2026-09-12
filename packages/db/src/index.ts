@@ -22,4 +22,10 @@ export {
   touchWorkerHeartbeat,
   reapDeadWorkers,
   findStaleWorkers,
+  LeaseConflictError,
+  grantJobLease,
+  renewJobLease,
+  releaseJobLease,
+  findExpiredLeases,
 } from './repository.js';
+

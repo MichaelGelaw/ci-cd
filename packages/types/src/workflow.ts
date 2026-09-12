@@ -91,6 +91,9 @@ export interface JobRecord {
   started_at: string | null;
   finished_at: string | null;
   duration_ms: number | null;
+  lease_token: string | null;
+  lease_expires_at: string | null;
+  lease_duration_seconds: number | null;
   created_at: string;
 }
 
@@ -144,5 +147,17 @@ export interface RegisterWorkerRequest {
 
 export interface WorkerHeartbeatRequest {
   status?: WorkerStatus;
+}
+
+// Lease models (Milestone 10)
+
+export interface RenewLeaseRequest {
+  lease_token: string;
+  duration_seconds?: number;
+}
+
+export interface RenewLeaseResponse {
+  job: JobRecord;
+  lease_expires_at: string;
 }
 

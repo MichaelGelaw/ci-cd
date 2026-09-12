@@ -7,6 +7,7 @@ import type {
   WorkerRecord,
   WorkerStatus,
 } from '@mini-ci/types';
+import { randomUUID } from 'node:crypto';
 import { getPool } from './connection.js';
 import { assertValidTransition } from './state-machine.js';
 
@@ -185,6 +186,9 @@ export async function createJob(params: {
       started_at::text,
       finished_at::text,
       duration_ms,
+      lease_token,
+      lease_expires_at::text,
+      lease_duration_seconds,
       created_at::text;
     `,
     [
@@ -225,6 +229,9 @@ export async function getJob(id: string): Promise<JobRecord | null> {
       started_at::text,
       finished_at::text,
       duration_ms,
+      lease_token,
+      lease_expires_at::text,
+      lease_duration_seconds,
       created_at::text
     FROM jobs
     WHERE id = $1;
@@ -257,6 +264,9 @@ export async function getJobsByWorkflowRun(workflowRunId: string): Promise<JobRe
       started_at::text,
       finished_at::text,
       duration_ms,
+      lease_token,
+      lease_expires_at::text,
+      lease_duration_seconds,
       created_at::text
     FROM jobs
     WHERE workflow_run_id = $1
@@ -290,6 +300,9 @@ export async function listQueuedJobs(limit: number = 100): Promise<JobRecord[]> 
       started_at::text,
       finished_at::text,
       duration_ms,
+      lease_token,
+      lease_expires_at::text,
+      lease_duration_seconds,
       created_at::text
     FROM jobs
     WHERE status = 'queued'
@@ -315,8 +328,26 @@ export async function countActiveJobsForWorkflowRun(workflowRunId: string): Prom
   return parseInt(rows[0]?.count ?? '0', 10);
 }
 
-export async function assignJobToWorker(jobId: string, workerId: string): Promise<JobRecord> {
-  return updateJobStatus(jobId, 'assigned', { workerId });
+export class LeaseConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LeaseConflictError';
+  }
+}
+
+export async function assignJobToWorker(
+  jobId: string,
+  workerId: string,
+  leaseDurationSeconds: number = 30,
+): Promise<JobRecord> {
+  const leaseToken = randomUUID();
+  const leaseExpiresAt = new Date(Date.now() + leaseDurationSeconds * 1000);
+  return updateJobStatus(jobId, 'assigned', {
+    workerId,
+    leaseToken,
+    leaseExpiresAt,
+    leaseDurationSeconds,
+  });
 }
 
 export async function updateJobStatus(
@@ -331,6 +362,9 @@ export async function updateJobStatus(
     startedAt?: Date | string;
     finishedAt?: Date | string;
     durationMs?: number | null;
+    leaseToken?: string | null;
+    leaseExpiresAt?: Date | string | null;
+    leaseDurationSeconds?: number | null;
   } = {},
 ): Promise<JobRecord> {
   const pool = getPool();
@@ -388,6 +422,23 @@ export async function updateJobStatus(
       setClauses.push(`duration_ms = $${paramIndex++}`);
       values.push(updates.durationMs);
     }
+    if (updates.leaseToken !== undefined) {
+      setClauses.push(`lease_token = $${paramIndex++}`);
+      values.push(updates.leaseToken);
+    } else if (['succeeded', 'failed', 'cancelled', 'timed_out'].includes(nextStatus)) {
+      // Clear lease on terminal states
+      setClauses.push('lease_token = NULL');
+    }
+    if (updates.leaseExpiresAt !== undefined) {
+      setClauses.push(`lease_expires_at = $${paramIndex++}`);
+      values.push(updates.leaseExpiresAt);
+    } else if (['succeeded', 'failed', 'cancelled', 'timed_out'].includes(nextStatus)) {
+      setClauses.push('lease_expires_at = NULL');
+    }
+    if (updates.leaseDurationSeconds !== undefined) {
+      setClauses.push(`lease_duration_seconds = $${paramIndex++}`);
+      values.push(updates.leaseDurationSeconds);
+    }
 
     const updateQuery = `
       UPDATE jobs
@@ -412,6 +463,9 @@ export async function updateJobStatus(
         started_at::text,
         finished_at::text,
         duration_ms,
+        lease_token,
+        lease_expires_at::text,
+        lease_duration_seconds,
         created_at::text;
     `;
 
@@ -424,6 +478,265 @@ export async function updateJobStatus(
   } finally {
     client.release();
   }
+}
+
+export async function grantJobLease(
+  jobId: string,
+  workerId: string,
+  durationSeconds: number = 30,
+): Promise<{ job: JobRecord; leaseToken: string; expiresAt: Date }> {
+  const leaseToken = randomUUID();
+  const expiresAt = new Date(Date.now() + durationSeconds * 1000);
+  const pool = getPool();
+  const { rows } = await pool.query<JobRecord>(
+    `
+    UPDATE jobs
+    SET
+      worker_id = $2,
+      lease_token = $3,
+      lease_expires_at = $4,
+      lease_duration_seconds = $5
+    WHERE id = $1
+    RETURNING
+      id,
+      workflow_run_id,
+      name,
+      command,
+      image,
+      status,
+      priority,
+      attempt,
+      max_attempts,
+      worker_id,
+      exit_code,
+      stdout,
+      stderr,
+      error,
+      timeout_seconds,
+      started_at::text,
+      finished_at::text,
+      duration_ms,
+      lease_token,
+      lease_expires_at::text,
+      lease_duration_seconds,
+      created_at::text;
+    `,
+    [jobId, workerId, leaseToken, expiresAt, durationSeconds],
+  );
+
+  if (rows.length === 0) {
+    throw new Error(`Job ${jobId} not found`);
+  }
+
+  return { job: rows[0]!, leaseToken, expiresAt };
+}
+
+export async function renewJobLease(
+  jobId: string,
+  leaseToken: string,
+  durationSeconds: number = 30,
+): Promise<{ job: JobRecord; leaseExpiresAt: string }> {
+  const pool = getPool();
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const { rows: existingRows } = await client.query<JobRecord>(
+      `
+      SELECT
+        id,
+        status,
+        lease_token,
+        lease_expires_at::text,
+        (lease_expires_at < NOW()) AS is_expired
+      FROM jobs
+      WHERE id = $1
+      FOR UPDATE;
+      `,
+      [jobId],
+    );
+
+    if (existingRows.length === 0) {
+      throw new Error(`Job ${jobId} not found`);
+    }
+
+    const job = existingRows[0]!;
+
+    if (job.status !== 'assigned' && job.status !== 'running') {
+      throw new LeaseConflictError(
+        `Cannot renew lease for job in status '${job.status}': job is not active`,
+      );
+    }
+
+    if (!job.lease_token || job.lease_token !== leaseToken) {
+      throw new LeaseConflictError(
+        `Invalid lease token for job ${jobId}: lease ownership mismatch`,
+      );
+    }
+
+    const isExpired = (job as unknown as { is_expired: boolean }).is_expired;
+    if (isExpired) {
+      throw new LeaseConflictError(
+        `Lease for job ${jobId} has expired and cannot be renewed`,
+      );
+    }
+
+    const { rows: updatedRows } = await client.query<JobRecord>(
+      `
+      UPDATE jobs
+      SET
+        lease_expires_at = NOW() + ($2 * interval '1 second'),
+        lease_duration_seconds = $2
+      WHERE id = $1
+      RETURNING
+        id,
+        workflow_run_id,
+        name,
+        command,
+        image,
+        status,
+        priority,
+        attempt,
+        max_attempts,
+        worker_id,
+        exit_code,
+        stdout,
+        stderr,
+        error,
+        timeout_seconds,
+        started_at::text,
+        finished_at::text,
+        duration_ms,
+        lease_token,
+        lease_expires_at::text,
+        lease_duration_seconds,
+        created_at::text;
+      `,
+      [jobId, durationSeconds],
+    );
+
+    await client.query('COMMIT');
+
+    const updatedJob = updatedRows[0]!;
+    return {
+      job: updatedJob,
+      leaseExpiresAt: updatedJob.lease_expires_at!,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function releaseJobLease(
+  jobId: string,
+  leaseToken?: string,
+): Promise<JobRecord> {
+  const pool = getPool();
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const { rows: existingRows } = await client.query<JobRecord>(
+      'SELECT id, lease_token FROM jobs WHERE id = $1 FOR UPDATE;',
+      [jobId],
+    );
+
+    if (existingRows.length === 0) {
+      throw new Error(`Job ${jobId} not found`);
+    }
+
+    const job = existingRows[0]!;
+    if (leaseToken && job.lease_token && job.lease_token !== leaseToken) {
+      throw new LeaseConflictError(`Invalid lease token for job ${jobId}`);
+    }
+
+    const { rows: updatedRows } = await client.query<JobRecord>(
+      `
+      UPDATE jobs
+      SET
+        lease_token = NULL,
+        lease_expires_at = NULL
+      WHERE id = $1
+      RETURNING
+        id,
+        workflow_run_id,
+        name,
+        command,
+        image,
+        status,
+        priority,
+        attempt,
+        max_attempts,
+        worker_id,
+        exit_code,
+        stdout,
+        stderr,
+        error,
+        timeout_seconds,
+        started_at::text,
+        finished_at::text,
+        duration_ms,
+        lease_token,
+        lease_expires_at::text,
+        lease_duration_seconds,
+        created_at::text;
+      `,
+      [jobId],
+    );
+
+    await client.query('COMMIT');
+    return updatedRows[0]!;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function findExpiredLeases(
+  gracePeriodSeconds: number = 0,
+): Promise<JobRecord[]> {
+  const pool = getPool();
+  const { rows } = await pool.query<JobRecord>(
+    `
+    SELECT
+      id,
+      workflow_run_id,
+      name,
+      command,
+      image,
+      status,
+      priority,
+      attempt,
+      max_attempts,
+      worker_id,
+      exit_code,
+      stdout,
+      stderr,
+      error,
+      timeout_seconds,
+      started_at::text,
+      finished_at::text,
+      duration_ms,
+      lease_token,
+      lease_expires_at::text,
+      lease_duration_seconds,
+      created_at::text
+    FROM jobs
+    WHERE status IN ('assigned', 'running')
+      AND lease_expires_at IS NOT NULL
+      AND lease_expires_at < NOW() - ($1 * interval '1 second')
+    ORDER BY lease_expires_at ASC;
+    `,
+    [gracePeriodSeconds],
+  );
+  return rows;
 }
 
 export async function recordJobAttempt(params: {
