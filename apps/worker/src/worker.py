@@ -92,9 +92,9 @@ class Worker:
             self.consumer.acknowledge_job(job_id)
             return
 
-        # If job is already cancelled or terminal, acknowledge and skip
-        if job.get("status") in ("succeeded", "failed", "cancelled"):
-            logger.info(f"Job {job_id} already in terminal state {job.get('status')}")
+        # If job is already cancelled, terminal, or retrying, acknowledge and skip
+        if job.get("status") in ("succeeded", "failed", "cancelled", "retrying"):
+            logger.info(f"Job {job_id} already in terminal or retrying state {job.get('status')}")
             self.consumer.acknowledge_job(job_id)
             return
 
@@ -171,7 +171,13 @@ class Worker:
                     else:
                         logger.info(f"Job {job_id} finished with status {reported_status}")
                 except Exception as e:
-                    logger.error(f"Failed to report final status for job {job_id}: {e}")
+                    err_str = str(e)
+                    if "INVALID_TRANSITION" in err_str or "LEASE_CONFLICT" in err_str or "409" in err_str:
+                        logger.warning(
+                            f"Job {job_id} was recovered or transitioned by control plane; status update ignored: {e}"
+                        )
+                    else:
+                        logger.error(f"Failed to report final status for job {job_id}: {e}")
         finally:
             if renewer:
                 renewer.stop()
