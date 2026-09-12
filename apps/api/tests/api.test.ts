@@ -1,7 +1,14 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { runMigrations, closePool, getPool, assignJobToWorker } from '@mini-ci/db';
-import { closeRedis, clearQueue, getQueueLength } from '@mini-ci/queue';
+import {
+  closeRedis,
+  clearQueue,
+  getQueueLength,
+  publishLogChunk,
+  publishLogEnd,
+  clearBufferedLogs,
+} from '@mini-ci/queue';
 import { buildServer } from '../src/server.js';
 
 describe('REST API Control Plane', () => {
@@ -929,6 +936,149 @@ steps:
       expect(tickBody).toHaveProperty('recovered');
       expect(tickBody).toHaveProperty('retried');
       expect(tickBody).toHaveProperty('scheduled');
+    });
+  });
+
+  describe('Logs API', () => {
+    it('returns 404 for non-existent job logs', async () => {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/jobs/00000000-0000-0000-0000-000000000000/logs',
+      });
+      expect(res.statusCode).toBe(404);
+    });
+
+    it('retrieves static logs in JSON and text formats with stream filtering', async () => {
+      const submitRes = await app.inject({
+        method: 'POST',
+        url: '/workflows/runs',
+        headers: { 'content-type': 'application/json' },
+        payload: {
+          yaml: `
+name: logs-api-test
+steps:
+  - run: echo "logs test"
+`,
+        },
+      });
+      const jobId = submitRes.json().jobs[0].id;
+
+      // Seed buffered log chunks into Redis
+      await publishLogChunk(jobId, {
+        jobId,
+        stream: 'stdout',
+        data: 'Step 1 output\n',
+        timestamp: new Date().toISOString(),
+        attempt: 1,
+      });
+      await publishLogChunk(jobId, {
+        jobId,
+        stream: 'stderr',
+        data: 'Warning: test warning\n',
+        timestamp: new Date().toISOString(),
+        attempt: 1,
+      });
+
+      // GET /jobs/:id/logs JSON format
+      const jsonRes = await app.inject({
+        method: 'GET',
+        url: `/jobs/${jobId}/logs`,
+      });
+      expect(jsonRes.statusCode).toBe(200);
+      const jsonBody = jsonRes.json();
+      expect(jsonBody.jobId).toBe(jobId);
+      expect(jsonBody.stdout).toContain('Step 1 output');
+      expect(jsonBody.stderr).toContain('Warning: test warning');
+      expect(jsonBody.events).toHaveLength(2);
+
+      // GET /jobs/:id/logs text format
+      const textRes = await app.inject({
+        method: 'GET',
+        url: `/jobs/${jobId}/logs?format=text`,
+      });
+      expect(textRes.statusCode).toBe(200);
+      expect(textRes.body).toContain('Step 1 output');
+      expect(textRes.body).toContain('Warning: test warning');
+
+      // Filter by stream: stdout only
+      const stdoutRes = await app.inject({
+        method: 'GET',
+        url: `/jobs/${jobId}/logs?stream=stdout&format=text`,
+      });
+      expect(stdoutRes.statusCode).toBe(200);
+      expect(stdoutRes.body).toContain('Step 1 output');
+      expect(stdoutRes.body).not.toContain('Warning: test warning');
+
+      await clearBufferedLogs(jobId);
+    });
+
+    it('streams logs via Server-Sent Events (SSE) with live chunks and end event', async () => {
+      const submitRes = await app.inject({
+        method: 'POST',
+        url: '/workflows/runs',
+        headers: { 'content-type': 'application/json' },
+        payload: {
+          yaml: `
+name: sse-test
+steps:
+  - run: echo "sse live"
+`,
+        },
+      });
+      const jobId = submitRes.json().jobs[0].id;
+
+      // Set job running
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/status`,
+        payload: { status: 'assigned', worker_id: 'worker-sse' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/status`,
+        payload: { status: 'running', worker_id: 'worker-sse' },
+      });
+
+      // Seed one buffered chunk
+      await publishLogChunk(jobId, {
+        jobId,
+        stream: 'stdout',
+        data: 'Initial buffered line\n',
+        timestamp: new Date().toISOString(),
+        attempt: 1,
+      });
+
+      // Launch async SSE stream injection
+      const streamPromise = app.inject({
+        method: 'GET',
+        url: `/jobs/${jobId}/logs/stream`,
+      });
+
+      // Publish live chunk and end event shortly after connection
+      setTimeout(async () => {
+        await publishLogChunk(jobId, {
+          jobId,
+          stream: 'stdout',
+          data: 'Live streamed line\n',
+          timestamp: new Date().toISOString(),
+          attempt: 1,
+        });
+        await publishLogEnd(jobId, {
+          jobId,
+          event: 'end',
+          exitCode: 0,
+          durationMs: 50,
+        });
+      }, 100);
+
+      const streamRes = await streamPromise;
+      expect(streamRes.statusCode).toBe(200);
+      expect(streamRes.headers['content-type']).toContain('text/event-stream');
+      expect(streamRes.body).toContain('Initial buffered line');
+      expect(streamRes.body).toContain('Live streamed line');
+      expect(streamRes.body).toContain('"event":"end"');
+
+      await clearBufferedLogs(jobId);
     });
   });
 });

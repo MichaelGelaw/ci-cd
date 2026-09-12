@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import type { JobStatus } from '@mini-ci/types';
+import type { JobStatus, LogEvent } from '@mini-ci/types';
 import {
   getJobDetails,
   cancelJob,
@@ -14,6 +14,11 @@ import {
   recoverStaleJobsService,
   LeaseConflictError,
 } from '../services/job-service.js';
+import {
+  getJobLogsService,
+  getBufferedLogs,
+  subscribeJobLogs,
+} from '../services/log-service.js';
 
 export const jobRoutes: FastifyPluginAsync = async (app) => {
   app.get('/jobs/recoverable', async (request, reply) => {
@@ -164,6 +169,117 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     }
 
     return reply.status(200).send({ job });
+  });
+
+  app.get('/jobs/:id/logs', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const format = String(query['format'] ?? 'json');
+    const streamFilter = String(query['stream'] ?? 'all');
+
+    const result = await getJobLogsService(id);
+    if (!result) {
+      return reply.status(404).send({
+        error: {
+          message: `Job ${id} not found`,
+          code: 'NOT_FOUND',
+        },
+      });
+    }
+
+    if (format === 'text') {
+      let output = '';
+      if (streamFilter === 'stdout') {
+        output = result.stdout;
+      } else if (streamFilter === 'stderr') {
+        output = result.stderr;
+      } else {
+        output = result.stdout + (result.stderr ? '\n' + result.stderr : '');
+      }
+      return reply.type('text/plain').send(output);
+    }
+
+    let filteredEvents = result.events;
+    if (streamFilter === 'stdout') {
+      filteredEvents = result.events.filter((e) => 'stream' in e && e.stream === 'stdout');
+    } else if (streamFilter === 'stderr') {
+      filteredEvents = result.events.filter((e) => 'stream' in e && e.stream === 'stderr');
+    }
+
+    return reply.status(200).send({
+      jobId: result.jobId,
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      events: filteredEvents,
+      count: filteredEvents.length,
+    });
+  });
+
+  app.get('/jobs/:id/logs/stream', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const job = await getJobDetails(id);
+    if (!job) {
+      return reply.status(404).send({
+        error: {
+          message: `Job ${id} not found`,
+          code: 'NOT_FOUND',
+        },
+      });
+    }
+
+    reply.raw.setHeader('Content-Type', 'text/event-stream');
+    reply.raw.setHeader('Cache-Control', 'no-cache');
+    reply.raw.setHeader('Connection', 'keep-alive');
+    reply.raw.setHeader('X-Accel-Buffering', 'no');
+    reply.raw.flushHeaders();
+
+    const sendEvent = (event: LogEvent) => {
+      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    // Replay buffered events
+    const buffered = await getBufferedLogs(id);
+    let sawEnd = false;
+    for (const ev of buffered) {
+      sendEvent(ev);
+      if ('event' in ev && ev.event === 'end') {
+        sawEnd = true;
+      }
+    }
+
+    const isTerminal = ['succeeded', 'failed', 'cancelled', 'timed_out'].includes(job.status);
+
+    if (sawEnd || isTerminal) {
+      if (!sawEnd) {
+        sendEvent({
+          jobId: id,
+          event: 'end',
+          exitCode: job.exit_code,
+          durationMs: job.duration_ms ?? undefined,
+        });
+      }
+      reply.raw.end();
+      return;
+    }
+
+    // Subscribe to live log stream
+    let closed = false;
+    const unsubscribe = await subscribeJobLogs(id, (event) => {
+      if (closed) return;
+      sendEvent(event);
+      if ('event' in event && event.event === 'end') {
+        closed = true;
+        unsubscribe().finally(() => {
+          reply.raw.end();
+        });
+      }
+    });
+
+    reply.raw.on('close', () => {
+      closed = true;
+      unsubscribe().catch(() => {});
+    });
   });
 
   app.post('/jobs/:id/status', async (request, reply) => {
