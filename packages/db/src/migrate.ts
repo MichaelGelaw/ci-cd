@@ -1,9 +1,30 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { getPool } from './connection.js';
 
+async function findMigrationsDir(startDir: string): Promise<string> {
+  let current = resolve(startDir);
+  while (true) {
+    const candidate = join(current, 'database', 'migrations');
+    try {
+      const s = await stat(candidate);
+      if (s.isDirectory()) {
+        return candidate;
+      }
+    } catch {
+      // Not found at this level, check parent
+    }
+    const parent = resolve(current, '..');
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+  return join(startDir, 'database', 'migrations');
+}
+
 export async function runMigrations(migrationsDir?: string): Promise<string[]> {
-  const dir = migrationsDir ?? resolve(process.cwd(), 'database/migrations');
+  const dir = migrationsDir ?? (await findMigrationsDir(process.cwd()));
   const pool = getPool();
   const client = await pool.connect();
 
