@@ -535,7 +535,7 @@ export async function renewJobLease(
   jobId: string,
   leaseToken: string,
   durationSeconds: number = 30,
-): Promise<{ job: JobRecord; leaseExpiresAt: string }> {
+): Promise<{ job: JobRecord; leaseExpiresAt: string; lease_expires_at: string }> {
   const pool = getPool();
   const client = await pool.connect();
 
@@ -622,6 +622,7 @@ export async function renewJobLease(
     return {
       job: updatedJob,
       leaseExpiresAt: updatedJob.lease_expires_at!,
+      lease_expires_at: updatedJob.lease_expires_at!,
     };
   } catch (err) {
     await client.query('ROLLBACK');

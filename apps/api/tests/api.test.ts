@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { runMigrations, closePool, getPool } from '@mini-ci/db';
+import { runMigrations, closePool, getPool, assignJobToWorker } from '@mini-ci/db';
 import { closeRedis, clearQueue, getQueueLength } from '@mini-ci/queue';
 import { buildServer } from '../src/server.js';
 
@@ -541,4 +541,90 @@ steps:
       expect(Array.isArray(body.scheduled)).toBe(true);
     });
   });
+
+  describe('Leases API', () => {
+    it('renews valid job lease and enforces fencing on mismatch or expiration', async () => {
+      // Create a workflow run with a job
+      const runRes = await app.inject({
+        method: 'POST',
+        url: '/workflows/runs',
+        headers: { 'content-type': 'application/json' },
+        payload: {
+          yaml: `
+name: lease-api-test
+steps:
+  - run: echo "lease testing"
+`,
+        },
+      });
+      const runBody = runRes.json();
+      const jobId = runBody.jobs[0].id;
+
+      // Assign job to worker to grant initial lease
+      const assigned = await assignJobToWorker(jobId, 'worker-lease-1', 30);
+      expect(assigned.lease_token).toBeTruthy();
+
+      // POST /jobs/:id/lease/renew without lease_token -> 400
+      const missingTokenRes = await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/lease/renew`,
+        payload: {},
+      });
+      expect(missingTokenRes.statusCode).toBe(400);
+
+      // POST /jobs/:id/lease/renew with wrong lease_token -> 409 LEASE_CONFLICT
+      const mismatchRes = await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/lease/renew`,
+        payload: { lease_token: 'bogus-token' },
+      });
+      expect(mismatchRes.statusCode).toBe(409);
+      expect(mismatchRes.json().error.code).toBe('LEASE_CONFLICT');
+
+      // POST /jobs/:id/lease/renew with correct lease_token -> 200
+      const renewRes = await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/lease/renew`,
+        payload: {
+          lease_token: assigned.lease_token,
+          duration_seconds: 60,
+        },
+      });
+      expect(renewRes.statusCode).toBe(200);
+      const renewBody = renewRes.json();
+      expect(renewBody.job.lease_duration_seconds).toBe(60);
+      expect(new Date(renewBody.lease_expires_at).getTime()).toBeGreaterThan(
+        new Date(assigned.lease_expires_at!).getTime(),
+      );
+
+      // Backdate lease in DB to test expired lease rejection
+      const pool = getPool();
+      await pool.query(
+        "UPDATE jobs SET lease_expires_at = NOW() - INTERVAL '30 seconds' WHERE id = $1;",
+        [jobId],
+      );
+
+      // GET /jobs/leases/expired should now list this job
+      const expiredRes = await app.inject({
+        method: 'GET',
+        url: '/jobs/leases/expired',
+      });
+      expect(expiredRes.statusCode).toBe(200);
+      const expiredBody = expiredRes.json();
+      expect(expiredBody.jobs.some((j: any) => j.id === jobId)).toBe(true);
+
+      // Renewing expired lease should return 409 LEASE_CONFLICT
+      const renewExpiredRes = await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/lease/renew`,
+        payload: {
+          lease_token: assigned.lease_token,
+          duration_seconds: 30,
+        },
+      });
+      expect(renewExpiredRes.statusCode).toBe(409);
+      expect(renewExpiredRes.json().error.code).toBe('LEASE_CONFLICT');
+    });
+  });
 });
+

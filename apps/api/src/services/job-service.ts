@@ -1,4 +1,10 @@
-import type { JobRecord, JobAttemptRecord, JobStatus } from '@mini-ci/types';
+import type {
+  JobRecord,
+  JobAttemptRecord,
+  JobStatus,
+  RenewLeaseRequest,
+  RenewLeaseResponse,
+} from '@mini-ci/types';
 import {
   getJob,
   updateJobStatus,
@@ -6,7 +12,11 @@ import {
   getJobsByWorkflowRun,
   updateWorkflowRun,
   recordJobAttempt,
+  renewJobLease,
+  findExpiredLeases,
+  LeaseConflictError,
 } from '@mini-ci/db';
+
 
 export async function getJobDetails(jobId: string): Promise<JobRecord | null> {
   return getJob(jobId);
@@ -105,3 +115,20 @@ export async function getAttempts(jobId: string): Promise<JobAttemptRecord[]> {
 
   return getJobAttempts(jobId);
 }
+
+export async function renewJobLeaseService(
+  jobId: string,
+  params: RenewLeaseRequest,
+): Promise<RenewLeaseResponse> {
+  const durationSeconds = params.duration_seconds ?? 30;
+  return renewJobLease(jobId, params.lease_token, durationSeconds);
+}
+
+export async function findExpiredLeasesService(
+  gracePeriodSeconds: number = 0,
+): Promise<JobRecord[]> {
+  return findExpiredLeases(gracePeriodSeconds);
+}
+
+export { LeaseConflictError };
+
