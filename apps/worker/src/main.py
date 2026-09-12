@@ -13,7 +13,7 @@ def main():
     worker = Worker()
 
     def handle_signal(sig, frame):
-        worker.running = False
+        worker.stop()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_signal)

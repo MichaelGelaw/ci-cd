@@ -6,6 +6,7 @@ from src.config import WorkerConfig
 from src.queue_consumer import QueueConsumer
 from src.api_client import ApiClient
 from src.executor import CommandExecutor
+from src.heartbeat import HeartbeatSender
 
 logger = logging.getLogger("worker")
 
@@ -23,6 +24,13 @@ class Worker:
         self.api = ApiClient(self.config.api_url)
         self.running = False
         self.is_registered = False
+        self.current_status = "ready"
+        self.heartbeat_sender = HeartbeatSender(
+            api_client=self.api,
+            worker_id=self.config.worker_id,
+            interval_seconds=self.config.heartbeat_interval_seconds,
+            status_provider=lambda: self.current_status,
+        )
 
     def register(self) -> bool:
         try:
@@ -51,12 +59,16 @@ class Worker:
             return False
 
     def heartbeat(self, status: Optional[str] = None) -> bool:
-        try:
-            self.api.heartbeat(self.config.worker_id, status=status)
-            return True
-        except Exception as e:
-            logger.warning(f"Heartbeat failed for worker {self.config.worker_id}: {e}")
-            return False
+        if status is not None:
+            self.current_status = status
+        self.heartbeat_sender.api = self.api
+        return self.heartbeat_sender.send_now(status)
+
+    def stop(self) -> None:
+        self.running = False
+        self.heartbeat_sender.api = self.api
+        self.heartbeat_sender.stop(final_status="offline")
+        logger.info(f"Worker {self.config.worker_id} stopped cleanly")
 
     def run_once(self, timeout_seconds: int = 1) -> bool:
         message = self.consumer.pop_job(timeout_seconds)
@@ -138,11 +150,15 @@ class Worker:
 
     def run_forever(self) -> None:
         self.register()
+        self.heartbeat_sender.start()
         self.running = True
         logger.info(f"Worker {self.config.worker_id} listening for jobs...")
-        while self.running:
-            try:
-                self.run_once(self.config.poll_timeout_seconds)
-            except Exception as e:
-                logger.error(f"Error processing job: {e}")
-                time.sleep(1)
+        try:
+            while self.running:
+                try:
+                    self.run_once(self.config.poll_timeout_seconds)
+                except Exception as e:
+                    logger.error(f"Error processing job: {e}")
+                    time.sleep(1)
+        finally:
+            self.stop()
