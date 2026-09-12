@@ -11,7 +11,12 @@
     "test:worker": "cd apps/worker && .venv/bin/pytest",
     "test:all": "vitest run && cd apps/worker && .venv/bin/pytest",
     "test:load": "tsx scripts/load-test.ts",
-    "dev:runner": "tsx apps/runner/src/main.ts"
+    "runner": "tsx apps/runner/src/main.ts",
+    "dev:runner": "tsx apps/runner/src/main.ts",
+    "start:api": "pnpm --filter @mini-ci/api start",
+    "dev:api": "pnpm --filter @mini-ci/api dev",
+    "dev:dashboard": "pnpm --filter @mini-ci/dashboard dev",
+    "start:worker": "cd apps/worker && .venv/bin/python -m src.main"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
