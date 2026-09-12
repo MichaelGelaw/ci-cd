@@ -1,0 +1,25 @@
+name: multi-job-pipeline
+
+jobs:
+  build:
+    name: Build Application
+    run: echo "Compiling application assets..."
+    artifacts:
+      paths:
+        - "dist/**"
+
+  lint:
+    name: Lint Code
+    run: echo "Checking code quality with linter..."
+
+  test:
+    name: Run Tests
+    needs: [build]
+    steps:
+      - run: echo "Running unit test suite..."
+      - run: echo "Running integration test suite..."
+
+  deploy:
+    name: Deploy to Production
+    needs: [test, lint]
+    run: echo "Deploying verified build to production..."
