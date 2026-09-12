@@ -172,3 +172,25 @@ export interface RenewLeaseResponse {
   lease_expires_at: string;
 }
 
+// Log streaming models (Milestone 13)
+
+export type LogStream = 'stdout' | 'stderr';
+
+export interface LogChunk {
+  jobId: string;
+  stream: LogStream;
+  data: string;
+  timestamp: string;
+  attempt?: number;
+}
+
+export interface LogEndEvent {
+  jobId: string;
+  event: 'end';
+  exitCode?: number | null;
+  durationMs?: number;
+}
+
+export type LogEvent = LogChunk | LogEndEvent;
+
+

@@ -18,5 +18,9 @@ export type {
   RenewLeaseRequest,
   RenewLeaseResponse,
   RetryPolicy,
+  LogStream,
+  LogChunk,
+  LogEndEvent,
+  LogEvent,
 } from './workflow.js';
 
