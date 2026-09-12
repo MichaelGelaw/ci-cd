@@ -5,6 +5,7 @@ export {
   createWorkflowRun,
   updateWorkflowRun,
   getWorkflowRun,
+  listWorkflowRuns,
   createJob,
   getJob,
   getJobsByWorkflowRun,

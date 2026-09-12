@@ -115,6 +115,31 @@ export async function getWorkflowRun(id: string): Promise<WorkflowRunRecord | nu
   return rows[0] ?? null;
 }
 
+export async function listWorkflowRuns(
+  limit: number = 20,
+  offset: number = 0,
+): Promise<WorkflowRunRecord[]> {
+  const pool = getPool();
+  const { rows } = await pool.query<WorkflowRunRecord>(
+    `
+    SELECT
+      id,
+      workflow_name,
+      status,
+      started_at::text,
+      finished_at::text,
+      duration_ms,
+      error,
+      created_at::text
+    FROM workflow_runs
+    ORDER BY created_at DESC
+    LIMIT $1 OFFSET $2;
+    `,
+    [limit, offset],
+  );
+  return rows;
+}
+
 export async function createJob(params: {
   workflowRunId: string;
   name: string;
