@@ -2,6 +2,7 @@ import json
 import logging
 import platform
 import threading
+import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -11,6 +12,7 @@ from src.api_client import ApiClient
 from src.executor import CommandExecutor
 from src.heartbeat import HeartbeatSender
 from src.lease_renewer import LeaseRenewer
+from src.artifact_collector import ArtifactCollector
 
 logger = logging.getLogger("worker")
 
@@ -188,14 +190,36 @@ class Worker:
 
         container_name = f"mini-ci-job-{job_id}-{attempt_num}"
         try:
-            result = CommandExecutor.execute(
-                command=command,
-                image=image,
-                timeout_seconds=timeout_seconds,
-                on_log_chunk=on_log_chunk,
-                cancellation_event=cancellation_event,
-                container_name=container_name,
-            )
+            with tempfile.TemporaryDirectory(prefix="mini-ci-job-") as workspace_dir:
+                result = CommandExecutor.execute(
+                    command=command,
+                    image=image,
+                    timeout_seconds=timeout_seconds,
+                    on_log_chunk=on_log_chunk,
+                    cancellation_event=cancellation_event,
+                    container_name=container_name,
+                    workspace_dir=workspace_dir,
+                )
+
+                cancelled_in_redis = False
+                try:
+                    res = self.consumer.redis.exists(f"mini_ci:jobs:{job_id}:cancelled")
+                    cancelled_in_redis = bool(res == 1 or res is True)
+                except Exception:
+                    pass
+
+                # Collect artifacts if configured and job succeeded
+                artifacts_config = job.get("artifacts")
+                if artifacts_config and result.exit_code == 0 and not (cancellation_event.is_set() or cancelled_in_redis):
+                    try:
+                        ArtifactCollector.collect_and_upload(
+                            workspace_dir=workspace_dir,
+                            artifacts_config=artifacts_config,
+                            api_client=self.api,
+                            job_id=job_id,
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to collect artifacts for job {job_id}: {e}")
 
             # Publish log end event
             end_payload = json.dumps({
@@ -210,13 +234,6 @@ class Worker:
                 self.consumer.redis.publish(f"mini_ci:jobs:{job_id}:logs", end_payload)
             except Exception as ex:
                 logger.warning(f"Failed to publish log end event for job {job_id}: {ex}")
-
-            cancelled_in_redis = False
-            try:
-                res = self.consumer.redis.exists(f"mini_ci:jobs:{job_id}:cancelled")
-                cancelled_in_redis = bool(res == 1 or res is True)
-            except Exception:
-                pass
 
             if cancellation_event.is_set() or cancelled_in_redis:
                 logger.info(f"Job {job_id} was cancelled during execution; skipping status update")

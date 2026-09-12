@@ -1,3 +1,4 @@
+import os
 from typing import Any, Dict, List, Optional
 import requests
 
@@ -115,4 +116,28 @@ class ApiClient:
             raise LeaseConflictError(f"Lease conflict for job {job_id}: {msg}")
         resp.raise_for_status()
         return resp.json()
+
+    def upload_artifact(
+        self,
+        job_id: str,
+        file_path: str,
+        name: Optional[str] = None,
+        logical_path: Optional[str] = None,
+        mime_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        url = f"{self.base_url}/jobs/{job_id}/artifacts"
+        filename = name or os.path.basename(file_path)
+        relpath = logical_path or filename
+
+        headers = {
+            "x-artifact-name": filename,
+            "x-artifact-path": relpath,
+        }
+        if mime_type:
+            headers["Content-Type"] = mime_type
+
+        with open(file_path, "rb") as f:
+            resp = requests.post(url, data=f, headers=headers, timeout=60)
+            resp.raise_for_status()
+            return resp.json()
 

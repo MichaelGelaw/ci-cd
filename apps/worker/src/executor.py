@@ -26,29 +26,61 @@ class CommandExecutor:
         on_log_chunk: Optional[Callable[[str, str], None]] = None,
         cancellation_event: Optional[threading.Event] = None,
         container_name: Optional[str] = None,
+        workspace_dir: Optional[str] = None,
     ) -> ExecutionResult:
-        with tempfile.TemporaryDirectory(prefix="mini-ci-worker-") as workspace_dir:
-            start_time = time.time()
-            if image:
-                return CommandExecutor._execute_docker(
+        if workspace_dir:
+            return CommandExecutor._run_in_workspace(
+                command=command,
+                workspace_dir=workspace_dir,
+                image=image,
+                timeout_seconds=timeout_seconds,
+                on_log_chunk=on_log_chunk,
+                cancellation_event=cancellation_event,
+                container_name=container_name,
+            )
+        else:
+            with tempfile.TemporaryDirectory(prefix="mini-ci-worker-") as temp_dir:
+                return CommandExecutor._run_in_workspace(
                     command=command,
+                    workspace_dir=temp_dir,
                     image=image,
-                    workspace_dir=workspace_dir,
                     timeout_seconds=timeout_seconds,
-                    start_time=start_time,
                     on_log_chunk=on_log_chunk,
                     cancellation_event=cancellation_event,
                     container_name=container_name,
                 )
-            else:
-                return CommandExecutor._execute_shell(
-                    command=command,
-                    workspace_dir=workspace_dir,
-                    timeout_seconds=timeout_seconds,
-                    start_time=start_time,
-                    on_log_chunk=on_log_chunk,
-                    cancellation_event=cancellation_event,
-                )
+
+    @staticmethod
+    def _run_in_workspace(
+        command: str,
+        workspace_dir: str,
+        image: Optional[str] = None,
+        timeout_seconds: Optional[int] = None,
+        on_log_chunk: Optional[Callable[[str, str], None]] = None,
+        cancellation_event: Optional[threading.Event] = None,
+        container_name: Optional[str] = None,
+    ) -> ExecutionResult:
+        start_time = time.time()
+        if image:
+            return CommandExecutor._execute_docker(
+                command=command,
+                image=image,
+                workspace_dir=workspace_dir,
+                timeout_seconds=timeout_seconds,
+                start_time=start_time,
+                on_log_chunk=on_log_chunk,
+                cancellation_event=cancellation_event,
+                container_name=container_name,
+            )
+        else:
+            return CommandExecutor._execute_shell(
+                command=command,
+                workspace_dir=workspace_dir,
+                timeout_seconds=timeout_seconds,
+                start_time=start_time,
+                on_log_chunk=on_log_chunk,
+                cancellation_event=cancellation_event,
+            )
 
     @staticmethod
     def _stream_process(
