@@ -4,8 +4,10 @@ import {
   assignJobToWorker,
   updateWorkerStatus,
   countActiveJobsForWorkflowRun,
+  evaluateAndPromoteDependentJobs,
 } from '@mini-ci/db';
-import { enqueueJobForWorker } from '@mini-ci/queue';
+import type { EvaluateDependenciesResult } from '@mini-ci/db';
+import { enqueueJob, enqueueJobForWorker } from '@mini-ci/queue';
 import { selectBestWorker } from './matcher.js';
 
 export interface SchedulerOptions {
@@ -32,7 +34,25 @@ export class Scheduler {
     };
   }
 
+  async evaluateDependencies(
+    workflowRunId?: string,
+  ): Promise<EvaluateDependenciesResult> {
+    const result = await evaluateAndPromoteDependentJobs(workflowRunId);
+    for (const job of result.promoted) {
+      await enqueueJob({
+        jobId: job.id,
+        workflowRunId: job.workflow_run_id,
+        queuedAt: job.created_at,
+        attempt: job.attempt,
+      });
+    }
+    return result;
+  }
+
   async scheduleRound(): Promise<SchedulingDecision[]> {
+    // 0. Advance DAG dependencies: promote ready created jobs to queued
+    await this.evaluateDependencies();
+
     const decisions: SchedulingDecision[] = [];
 
     // 1. Fetch queued jobs ordered by priority DESC, created_at ASC

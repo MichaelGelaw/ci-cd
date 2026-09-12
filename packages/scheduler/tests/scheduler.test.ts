@@ -188,4 +188,50 @@ describe('Scheduler Job-to-Worker Assignment', () => {
     const decisions = await scheduler.scheduleRound();
     expect(Array.isArray(decisions)).toBe(true);
   });
+
+  it('promotes created DAG jobs whose dependencies succeeded and assigns them to workers', async () => {
+    const run = await createWorkflowRun('dag-scheduler-test', 'running');
+
+    // Job A is already succeeded
+    const jobA = await createJob({
+      workflowRunId: run.id,
+      jobKey: 'job-a',
+      needs: [],
+      name: 'Job A',
+      command: 'echo a',
+      status: 'succeeded',
+    });
+
+    // Job B is created and depends on Job A
+    const jobB = await createJob({
+      workflowRunId: run.id,
+      jobKey: 'job-b',
+      needs: ['job-a'],
+      name: 'Job B',
+      command: 'echo b',
+      status: 'created',
+    });
+
+    // Register a ready worker
+    const workerId = `worker-dag-${Date.now()}`;
+    await registerWorker({
+      id: workerId,
+      name: 'worker-dag',
+      tags: ['shell'],
+    });
+
+    const scheduler = new Scheduler();
+    const decisions = await scheduler.scheduleRound();
+
+    // Job B should be promoted and assigned to worker
+    const decision = decisions.find((d) => d.jobId === jobB.id);
+    expect(decision).toBeDefined();
+    expect(decision?.workerId).toBe(workerId);
+
+    const fetchedJobB = await getJob(jobB.id);
+    expect(fetchedJobB?.status).toBe('assigned');
+    expect(fetchedJobB?.worker_id).toBe(workerId);
+
+    await clearWorkerQueue(workerId);
+  });
 });
