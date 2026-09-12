@@ -38,12 +38,15 @@ export {
   getArtifactsByJob,
   getArtifactsByWorkflowRun,
   deleteArtifact,
+  findStagedJobs,
+  evaluateAndPromoteDependentJobs,
 } from './repository.js';
 export type {
   FindRecoverableJobsOptions,
   RecoverJobOptions,
   RecoverJobResult,
   CancelWorkflowRunResult,
+  EvaluateDependenciesResult,
 } from './repository.js';
 export { calculateRetryDelay, isFailureRetryable } from './retry.js';
 

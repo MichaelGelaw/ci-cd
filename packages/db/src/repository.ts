@@ -1915,4 +1915,212 @@ export async function deleteArtifact(id: string): Promise<boolean> {
   return (rowCount ?? 0) > 0;
 }
 
+export interface EvaluateDependenciesResult {
+  promoted: JobRecord[];
+  cancelled: JobRecord[];
+}
+
+const JOB_COLUMNS = `
+  id,
+  workflow_run_id,
+  job_key,
+  needs,
+  name,
+  command,
+  image,
+  status,
+  priority,
+  attempt,
+  max_attempts,
+  worker_id,
+  exit_code,
+  stdout,
+  stderr,
+  error,
+  timeout_seconds,
+  started_at::text,
+  finished_at::text,
+  duration_ms,
+  lease_token,
+  lease_expires_at::text,
+  lease_duration_seconds,
+  retry_policy,
+  next_retry_at::text,
+  artifacts,
+  created_at::text
+`;
+
+export async function findStagedJobs(workflowRunId?: string): Promise<JobRecord[]> {
+  const pool = getPool();
+  if (workflowRunId) {
+    const { rows } = await pool.query<JobRecord>(
+      `SELECT ${JOB_COLUMNS} FROM jobs WHERE workflow_run_id = $1 AND status = 'created' ORDER BY created_at ASC;`,
+      [workflowRunId],
+    );
+    return rows;
+  }
+
+  const { rows } = await pool.query<JobRecord>(
+    `SELECT ${JOB_COLUMNS} FROM jobs WHERE status = 'created' ORDER BY created_at ASC;`,
+  );
+  return rows;
+}
+
+export async function evaluateAndPromoteDependentJobs(
+  workflowRunId?: string,
+): Promise<EvaluateDependenciesResult> {
+  const pool = getPool();
+  let targetRunIds: string[] = [];
+
+  if (workflowRunId) {
+    targetRunIds = [workflowRunId];
+  } else {
+    const { rows } = await pool.query<{ workflow_run_id: string }>(
+      `SELECT DISTINCT workflow_run_id FROM jobs WHERE status = 'created';`,
+    );
+    targetRunIds = rows.map((r) => r.workflow_run_id);
+  }
+
+  const allPromoted: JobRecord[] = [];
+  const allCancelled: JobRecord[] = [];
+
+  for (const runId of targetRunIds) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const { rows: jobsInRun } = await client.query<JobRecord>(
+        `SELECT ${JOB_COLUMNS} FROM jobs WHERE workflow_run_id = $1 FOR UPDATE;`,
+        [runId],
+      );
+
+      const jobMap = new Map<string, JobRecord>();
+      for (const j of jobsInRun) {
+        if (j.job_key) {
+          jobMap.set(j.job_key, j);
+        }
+        jobMap.set(j.name, j);
+        jobMap.set(j.id, j);
+      }
+
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const job of jobsInRun) {
+          if (job.status !== 'created') {
+            continue;
+          }
+
+          const needs: string[] = Array.isArray(job.needs)
+            ? job.needs
+            : typeof job.needs === 'string'
+              ? [job.needs]
+              : [];
+
+          if (needs.length === 0) {
+            const { rows: updated } = await client.query<JobRecord>(
+              `UPDATE jobs SET status = 'queued' WHERE id = $1 RETURNING ${JOB_COLUMNS};`,
+              [job.id],
+            );
+            const updatedJob = updated[0]!;
+            job.status = 'queued';
+            jobMap.set(job.id, updatedJob);
+            if (job.job_key) jobMap.set(job.job_key, updatedJob);
+            allPromoted.push(updatedJob);
+            changed = true;
+            continue;
+          }
+
+          let allSucceeded = true;
+          let failedDep: JobRecord | null = null;
+
+          for (const depKey of needs) {
+            const depJob = jobMap.get(depKey);
+            if (!depJob) {
+              allSucceeded = false;
+              failedDep = { name: depKey, status: 'failed' } as JobRecord;
+              break;
+            }
+
+            if (depJob.status === 'succeeded') {
+              continue;
+            }
+
+            if (
+              depJob.status === 'failed' ||
+              depJob.status === 'cancelled' ||
+              depJob.status === 'timed_out'
+            ) {
+              allSucceeded = false;
+              failedDep = depJob;
+              break;
+            }
+
+            allSucceeded = false;
+          }
+
+          if (failedDep) {
+            const reason = `Dependency "${failedDep.job_key ?? failedDep.name}" did not succeed (${failedDep.status})`;
+            const { rows: updated } = await client.query<JobRecord>(
+              `UPDATE jobs SET status = 'cancelled', error = $2, finished_at = NOW() WHERE id = $1 RETURNING ${JOB_COLUMNS};`,
+              [job.id, reason],
+            );
+            const updatedJob = updated[0]!;
+            job.status = 'cancelled';
+            jobMap.set(job.id, updatedJob);
+            if (job.job_key) jobMap.set(job.job_key, updatedJob);
+            allCancelled.push(updatedJob);
+            changed = true;
+          } else if (allSucceeded) {
+            const { rows: updated } = await client.query<JobRecord>(
+              `UPDATE jobs SET status = 'queued' WHERE id = $1 RETURNING ${JOB_COLUMNS};`,
+              [job.id],
+            );
+            const updatedJob = updated[0]!;
+            job.status = 'queued';
+            jobMap.set(job.id, updatedJob);
+            if (job.job_key) jobMap.set(job.job_key, updatedJob);
+            allPromoted.push(updatedJob);
+            changed = true;
+          }
+        }
+      }
+
+      // Check if all jobs in this workflow run have reached a terminal state
+      const terminalStatuses = ['succeeded', 'failed', 'cancelled', 'timed_out'];
+      const allTerminal = jobsInRun.every((j) => terminalStatuses.includes(j.status));
+
+      if (allTerminal) {
+        const anyFailed = jobsInRun.some(
+          (j) => j.status === 'failed' || j.status === 'cancelled' || j.status === 'timed_out',
+        );
+        const totalDuration = jobsInRun.reduce((acc, j) => acc + (j.duration_ms ?? 0), 0);
+        await client.query(
+          `UPDATE workflow_runs
+           SET status = $2,
+               finished_at = NOW(),
+               duration_ms = $3,
+               error = $4
+           WHERE id = $1 AND status = 'running';`,
+          [
+            runId,
+            anyFailed ? 'failed' : 'succeeded',
+            totalDuration,
+            anyFailed ? 'One or more jobs failed, timed out, or were cancelled' : null,
+          ],
+        );
+      }
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  return { promoted: allPromoted, cancelled: allCancelled };
+}
+
 

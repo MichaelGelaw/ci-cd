@@ -36,6 +36,8 @@ import {
   getArtifactsByJob,
   getArtifactsByWorkflowRun,
   deleteArtifact,
+  findStagedJobs,
+  evaluateAndPromoteDependentJobs,
   getPool,
 } from '../src/index.js';
 
@@ -696,6 +698,132 @@ describe('Database Repository', () => {
     expect(jobs[0]?.needs).toEqual([]);
     expect(jobs[1]?.job_key).toBe('test');
     expect(jobs[1]?.needs).toEqual(['build']);
+  });
+
+  it('evaluates DAG dependencies and promotes jobs when upstream dependencies succeed', async () => {
+    const run = await createWorkflowRun('dag-promotion-test');
+
+    const build = await createJob({
+      workflowRunId: run.id,
+      jobKey: 'build',
+      needs: [],
+      name: 'Build',
+      command: 'npm run build',
+      status: 'created',
+    });
+
+    const lint = await createJob({
+      workflowRunId: run.id,
+      jobKey: 'lint',
+      needs: [],
+      name: 'Lint',
+      command: 'npm run lint',
+      status: 'created',
+    });
+
+    const test = await createJob({
+      workflowRunId: run.id,
+      jobKey: 'test',
+      needs: ['build'],
+      name: 'Test',
+      command: 'npm test',
+      status: 'created',
+    });
+
+    const deploy = await createJob({
+      workflowRunId: run.id,
+      jobKey: 'deploy',
+      needs: ['test', 'lint'],
+      name: 'Deploy',
+      command: './deploy.sh',
+      status: 'created',
+    });
+
+    // 1. Initial evaluation: root jobs (build, lint) should be promoted
+    const round1 = await evaluateAndPromoteDependentJobs(run.id);
+    expect(round1.promoted.map((j) => j.job_key).sort()).toEqual(['build', 'lint']);
+    expect(round1.cancelled).toEqual([]);
+
+    const stagedAfterRound1 = await findStagedJobs(run.id);
+    expect(stagedAfterRound1.map((j) => j.job_key).sort()).toEqual(['deploy', 'test']);
+
+    // 2. Mark build as succeeded; lint is still queued
+    await updateJobStatus(build.id, 'assigned');
+    await updateJobStatus(build.id, 'running');
+    await updateJobStatus(build.id, 'succeeded');
+
+    const round2 = await evaluateAndPromoteDependentJobs(run.id);
+    expect(round2.promoted.map((j) => j.job_key)).toEqual(['test']);
+
+    // deploy is still waiting on lint and test
+    const stagedAfterRound2 = await findStagedJobs(run.id);
+    expect(stagedAfterRound2.map((j) => j.job_key)).toEqual(['deploy']);
+
+    // 3. Mark lint succeeded, test succeeded
+    await updateJobStatus(lint.id, 'assigned');
+    await updateJobStatus(lint.id, 'running');
+    await updateJobStatus(lint.id, 'succeeded');
+
+    await updateJobStatus(test.id, 'assigned');
+    await updateJobStatus(test.id, 'running');
+    await updateJobStatus(test.id, 'succeeded');
+
+    const round3 = await evaluateAndPromoteDependentJobs(run.id);
+    expect(round3.promoted.map((j) => j.job_key)).toEqual(['deploy']);
+
+    const stagedAfterRound3 = await findStagedJobs(run.id);
+    expect(stagedAfterRound3).toHaveLength(0);
+  });
+
+  it('cascades cancellations down the DAG when an upstream job fails', async () => {
+    const run = await createWorkflowRun('dag-failure-cascade-test');
+
+    const root = await createJob({
+      workflowRunId: run.id,
+      jobKey: 'root',
+      needs: [],
+      name: 'Root Job',
+      command: 'exit 1',
+      status: 'created',
+    });
+
+    const middle = await createJob({
+      workflowRunId: run.id,
+      jobKey: 'middle',
+      needs: ['root'],
+      name: 'Middle Job',
+      command: 'echo middle',
+      status: 'created',
+    });
+
+    const leaf = await createJob({
+      workflowRunId: run.id,
+      jobKey: 'leaf',
+      needs: ['middle'],
+      name: 'Leaf Job',
+      command: 'echo leaf',
+      status: 'created',
+    });
+
+    // Mark root as failed
+    await updateJobStatus(root.id, 'queued');
+    await updateJobStatus(root.id, 'assigned');
+    await updateJobStatus(root.id, 'running');
+    await updateJobStatus(root.id, 'failed', { error: 'Command failed with exit code 1' });
+
+    // Evaluate DAG
+    const result = await evaluateAndPromoteDependentJobs(run.id);
+    expect(result.promoted).toHaveLength(0);
+    expect(result.cancelled.map((j) => j.job_key).sort()).toEqual(['leaf', 'middle']);
+
+    const updatedMiddle = await getJob(middle.id);
+    const updatedLeaf = await getJob(leaf.id);
+    expect(updatedMiddle?.status).toBe('cancelled');
+    expect(updatedLeaf?.status).toBe('cancelled');
+
+    // Workflow run should now be marked as failed
+    const updatedRun = await getWorkflowRun(run.id);
+    expect(updatedRun?.status).toBe('failed');
   });
 });
 
