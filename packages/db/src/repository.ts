@@ -697,3 +697,55 @@ export async function touchWorkerHeartbeat(
 
   return rows[0]!;
 }
+
+export async function reapDeadWorkers(timeoutSeconds: number = 30): Promise<WorkerRecord[]> {
+  const pool = getPool();
+  const { rows } = await pool.query<WorkerRecord>(
+    `
+    UPDATE workers
+    SET
+      status = 'offline',
+      updated_at = NOW()
+    WHERE status IN ('ready', 'busy')
+      AND last_heartbeat_at < NOW() - ($1 || ' seconds')::interval
+    RETURNING
+      id,
+      name,
+      status,
+      address,
+      tags,
+      metadata,
+      registered_at::text,
+      last_heartbeat_at::text,
+      created_at::text,
+      updated_at::text;
+    `,
+    [timeoutSeconds],
+  );
+  return rows;
+}
+
+export async function findStaleWorkers(timeoutSeconds: number = 30): Promise<WorkerRecord[]> {
+  const pool = getPool();
+  const { rows } = await pool.query<WorkerRecord>(
+    `
+    SELECT
+      id,
+      name,
+      status,
+      address,
+      tags,
+      metadata,
+      registered_at::text,
+      last_heartbeat_at::text,
+      created_at::text,
+      updated_at::text
+    FROM workers
+    WHERE status IN ('ready', 'busy')
+      AND last_heartbeat_at < NOW() - ($1 || ' seconds')::interval
+    ORDER BY last_heartbeat_at ASC;
+    `,
+    [timeoutSeconds],
+  );
+  return rows;
+}

@@ -16,6 +16,9 @@ import {
   listWorkers,
   updateWorkerStatus,
   touchWorkerHeartbeat,
+  reapDeadWorkers,
+  findStaleWorkers,
+  getPool,
 } from '../src/index.js';
 
 describe('Database Repository', () => {
@@ -192,5 +195,47 @@ describe('Database Repository', () => {
     expect(updatedWorker.address).toBe('10.0.0.2:5000');
     expect(updatedWorker.tags).toEqual(['docker', 'arm64']);
     expect(updatedWorker.status).toBe('ready');
+  });
+
+  it('detects and reaps stale workers whose heartbeats expired', async () => {
+    const staleWorkerId = `stale-worker-${Date.now()}`;
+    const activeWorkerId = `active-worker-${Date.now()}`;
+
+    // Register active worker
+    await registerWorker({
+      id: activeWorkerId,
+      name: 'active-worker',
+      tags: ['docker'],
+    });
+
+    // Register worker and manually backdate last_heartbeat_at
+    await registerWorker({
+      id: staleWorkerId,
+      name: 'stale-worker',
+      tags: ['shell'],
+    });
+
+    const pool = getPool();
+    await pool.query(
+      "UPDATE workers SET last_heartbeat_at = NOW() - INTERVAL '120 seconds' WHERE id = $1;",
+      [staleWorkerId],
+    );
+
+    // Find stale workers with 30s threshold
+    const staleList = await findStaleWorkers(30);
+    expect(staleList.some((w) => w.id === staleWorkerId)).toBe(true);
+    expect(staleList.some((w) => w.id === activeWorkerId)).toBe(false);
+
+    // Reap dead workers with 30s threshold
+    const reaped = await reapDeadWorkers(30);
+    expect(reaped.some((w) => w.id === staleWorkerId)).toBe(true);
+    expect(reaped.some((w) => w.id === activeWorkerId)).toBe(false);
+
+    // Verify DB state
+    const staleRecord = await getWorker(staleWorkerId);
+    expect(staleRecord?.status).toBe('offline');
+
+    const activeRecord = await getWorker(activeWorkerId);
+    expect(activeRecord?.status).toBe('ready');
   });
 });

@@ -20,4 +20,6 @@ export {
   listWorkers,
   updateWorkerStatus,
   touchWorkerHeartbeat,
+  reapDeadWorkers,
+  findStaleWorkers,
 } from './repository.js';
