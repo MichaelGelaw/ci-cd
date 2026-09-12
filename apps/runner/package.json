@@ -8,6 +8,10 @@
   },
   "dependencies": {
     "@mini-ci/types": "workspace:*",
+    "dockerode": "^4.0.0",
     "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^3.3.0"
   }
 }
