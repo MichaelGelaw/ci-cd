@@ -37,8 +37,18 @@ export async function runStepInDocker(
   command: string,
   workspaceDir: string,
   timeoutMs: number | undefined,
+  signal?: AbortSignal,
 ): Promise<DockerStepResult> {
   let container: Docker.Container | undefined;
+
+  if (signal?.aborted) {
+    return {
+      exit_code: null,
+      stdout: '',
+      stderr: '',
+      error: 'Cancelled by user request',
+    };
+  }
 
   try {
     await pullImage(image);
@@ -61,7 +71,25 @@ export async function runStepInDocker(
 
     // Set up timeout if configured.
     let killed = false;
+    let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const onAbort = async () => {
+      cancelled = true;
+      try {
+        await container!.kill();
+      } catch {
+        try {
+          await container!.stop({ t: 1 });
+        } catch {
+          // Container may have already stopped.
+        }
+      }
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
 
     if (timeoutMs !== undefined) {
       timer = setTimeout(async () => {
@@ -78,6 +106,7 @@ export async function runStepInDocker(
     const { StatusCode } = await container.wait();
 
     if (timer) clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', onAbort);
 
     // Collect logs after the container has stopped.
     const logStream = await container.logs({
@@ -89,6 +118,15 @@ export async function runStepInDocker(
     // Docker multiplexes stdout/stderr in a single stream with 8-byte headers.
     // Each frame: [stream_type(1) + padding(3) + size(4)] + payload
     const { stdout, stderr } = demuxDockerLogs(logStream as unknown as Buffer);
+
+    if (cancelled || signal?.aborted) {
+      return {
+        exit_code: StatusCode,
+        stdout,
+        stderr,
+        error: 'Cancelled by user request',
+      };
+    }
 
     if (killed) {
       return {

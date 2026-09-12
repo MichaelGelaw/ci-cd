@@ -23,6 +23,7 @@ export interface ExecuteOptions {
   mode?: 'shell' | 'docker';
   shell?: string;
   persist?: boolean;
+  signal?: AbortSignal;
 }
 
 interface StepOutput {
@@ -46,12 +47,24 @@ function runStepShell(
   command: string,
   timeoutMs: number | undefined,
   shell: string | boolean,
+  signal?: AbortSignal,
 ): Promise<StepOutput> {
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
     let killed = false;
+    let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+
+    if (signal?.aborted) {
+      resolve({
+        exit_code: null,
+        stdout: '',
+        stderr: '',
+        error: 'Cancelled by user request',
+      });
+      return;
+    }
 
     const child = spawn(command, [], {
       shell,
@@ -67,6 +80,19 @@ function runStepShell(
       stderr += chunk.toString();
     });
 
+    const onAbort = () => {
+      cancelled = true;
+      if (child.pid !== undefined) {
+        killProcessTree(child.pid);
+      } else {
+        child.kill('SIGKILL');
+      }
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
     if (timeoutMs !== undefined) {
       timer = setTimeout(() => {
         killed = true;
@@ -80,11 +106,23 @@ function runStepShell(
 
     child.on('error', (err: Error) => {
       if (timer) clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
       resolve({ exit_code: null, stdout, stderr, error: err.message });
     });
 
     child.on('close', (code: number | null) => {
       if (timer) clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+
+      if (cancelled || signal?.aborted) {
+        resolve({
+          exit_code: code,
+          stdout,
+          stderr,
+          error: 'Cancelled by user request',
+        });
+        return;
+      }
 
       if (killed) {
         resolve({
@@ -111,6 +149,7 @@ export async function executeWorkflow(
   const workflowStart = new Date();
   const results: StepResult[] = [];
   let failed = false;
+  let cancelled = false;
 
   let dbRunId: string | null = null;
   const dbJobIds: (string | null)[] = [];
@@ -149,6 +188,35 @@ export async function executeWorkflow(
       const step = workflow.steps[i]!;
       const stepName = step.name ?? `Step ${i + 1}`;
       const dbJobId = dbJobIds[i];
+
+      if (cancelled || options.signal?.aborted) {
+        cancelled = true;
+        if (dbJobId) {
+          try {
+            await updateJobStatus(dbJobId, 'queued');
+            await updateJobStatus(dbJobId, 'cancelled', {
+              error: 'Cancelled by user request',
+            });
+          } catch {
+            // Best-effort status update
+          }
+        }
+
+        results.push({
+          index: i,
+          name: stepName,
+          command: step.run,
+          status: 'cancelled',
+          exit_code: null,
+          stdout: '',
+          stderr: '',
+          error: 'Cancelled by user request',
+          started_at: new Date().toISOString(),
+          finished_at: new Date().toISOString(),
+          duration_ms: 0,
+        });
+        continue;
+      }
 
       if (failed) {
         if (dbJobId) {
@@ -218,15 +286,18 @@ export async function executeWorkflow(
               error: 'No Docker image specified for step or workflow',
             };
           } else {
-            result = await runStepInDocker(image, step.run, workspaceDir!, timeoutMs);
+            result = await runStepInDocker(image, step.run, workspaceDir!, timeoutMs, options.signal);
           }
         } else {
-          result = await runStepShell(step.run, timeoutMs, options.shell ?? true);
+          result = await runStepShell(step.run, timeoutMs, options.shell ?? true, options.signal);
         }
 
         stepEnd = new Date();
 
-        if (result.error) {
+        if (result.error === 'Cancelled by user request' || options.signal?.aborted) {
+          status = 'cancelled';
+          cancelled = true;
+        } else if (result.error) {
           status = 'failed';
         } else if (result.exit_code === 0) {
           status = 'success';
@@ -234,7 +305,7 @@ export async function executeWorkflow(
           status = 'failed';
         }
 
-        if (status === 'success') {
+        if (status === 'success' || status === 'cancelled') {
           break;
         }
 
@@ -269,7 +340,7 @@ export async function executeWorkflow(
       }
 
       if (dbJobId) {
-        const targetStatus = status === 'success' ? 'succeeded' : 'failed';
+        const targetStatus = status === 'success' ? 'succeeded' : status === 'cancelled' ? 'cancelled' : 'failed';
         await updateJobStatus(dbJobId, targetStatus, {
           exitCode: result.exit_code,
           stdout: result.stdout,
@@ -302,16 +373,16 @@ export async function executeWorkflow(
 
   if (dbRunId) {
     await updateWorkflowRun(dbRunId, {
-      status: failed ? 'failed' : 'succeeded',
+      status: cancelled ? 'cancelled' : failed ? 'failed' : 'succeeded',
       finished_at: workflowEnd,
       duration_ms: totalDurationMs,
-      error: failed ? 'One or more steps failed' : null,
+      error: cancelled ? 'Workflow cancelled by user request' : failed ? 'One or more steps failed' : null,
     });
   }
 
   return {
     workflow_name: workflow.name,
-    status: failed ? 'failed' : 'success',
+    status: cancelled ? 'cancelled' : failed ? 'failed' : 'success',
     steps: results,
     started_at: workflowStart.toISOString(),
     finished_at: workflowEnd.toISOString(),

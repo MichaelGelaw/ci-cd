@@ -24,8 +24,8 @@ export interface WorkflowDefinition {
 
 // Execution results -- produced by the runner after executing a workflow.
 
-export type StepStatus = 'success' | 'failed' | 'skipped';
-export type WorkflowStatus = 'success' | 'failed';
+export type StepStatus = 'success' | 'failed' | 'skipped' | 'cancelled';
+export type WorkflowStatus = 'success' | 'failed' | 'cancelled';
 
 export interface StepResult {
   index: number;

@@ -206,5 +206,44 @@ describe('executeWorkflow', () => {
     expect(result.status).toBe('success');
     expect(result.steps[0]!.status).toBe('success');
   });
+
+  it('aborts running workflow when AbortSignal is triggered', async () => {
+    const controller = new AbortController();
+    const workflow: WorkflowDefinition = {
+      name: 'abort-test',
+      steps: [
+        { name: 'long-sleep', run: 'sleep 10' },
+        { name: 'next-step', run: 'echo "should not run"' },
+      ],
+    };
+
+    setTimeout(() => {
+      controller.abort();
+    }, 150);
+
+    const start = Date.now();
+    const result = await executeWorkflow(workflow, { signal: controller.signal });
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(3000);
+    expect(result.status).toBe('cancelled');
+    expect(result.steps).toHaveLength(2);
+    expect(result.steps[0]!.status).toBe('cancelled');
+    expect(result.steps[0]!.error).toBe('Cancelled by user request');
+    expect(result.steps[1]!.status).toBe('cancelled');
+  });
+
+  it('cancels immediately if AbortSignal is already aborted', async () => {
+    const signal = AbortSignal.abort();
+    const workflow: WorkflowDefinition = {
+      name: 'pre-aborted-test',
+      steps: [{ name: 'step-1', run: 'echo "hello"' }],
+    };
+
+    const result = await executeWorkflow(workflow, { signal });
+    expect(result.status).toBe('cancelled');
+    expect(result.steps[0]!.status).toBe('cancelled');
+    expect(result.steps[0]!.error).toBe('Cancelled by user request');
+  });
 });
 
