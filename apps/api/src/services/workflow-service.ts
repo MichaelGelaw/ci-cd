@@ -33,6 +33,7 @@ export async function submitWorkflow(
     const stepName = step.name ?? `Step ${i + 1}`;
     const image = step.image ?? definition.image;
 
+    const retryPolicy = step.retry ?? (step.retries !== undefined ? { max_attempts: step.retries + 1 } : undefined);
     const job = await createJob({
       workflowRunId: run.id,
       name: stepName,
@@ -40,6 +41,7 @@ export async function submitWorkflow(
       image: image ?? null,
       timeoutSeconds: step.timeout_seconds ?? null,
       status: 'queued',
+      retryPolicy,
     });
 
     await enqueueJob({

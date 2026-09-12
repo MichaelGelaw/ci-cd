@@ -14,8 +14,14 @@ import {
   recordJobAttempt,
   renewJobLease,
   findExpiredLeases,
+  findDueRetryingJobs,
+  requeueJobForRetry,
+  calculateRetryDelay,
+  isFailureRetryable,
   LeaseConflictError,
 } from '@mini-ci/db';
+import { enqueueJob } from '@mini-ci/queue';
+
 
 
 export async function getJobDetails(jobId: string): Promise<JobRecord | null> {
@@ -61,14 +67,61 @@ export async function updateJobExecutionStatus(
 
   if (params.status === 'running') {
     updates.startedAt = new Date();
-  } else if (params.status === 'succeeded' || params.status === 'failed' || params.status === 'cancelled') {
+  } else if (params.status === 'succeeded' || params.status === 'failed' || params.status === 'cancelled' || params.status === 'timed_out') {
     updates.finishedAt = new Date();
+  }
+
+  // Check if job failure is eligible for retry
+  if (params.status === 'failed' || params.status === 'timed_out') {
+    const isRetryable =
+      existing.attempt < existing.max_attempts &&
+      isFailureRetryable(params.status, existing.retry_policy);
+
+    if (isRetryable) {
+      const delaySeconds = calculateRetryDelay(existing.attempt, existing.retry_policy);
+      const finishedAt = new Date();
+
+      // Record this attempt before transitioning
+      try {
+        await recordJobAttempt({
+          jobId: existing.id,
+          attemptNumber: existing.attempt,
+          status: params.status,
+          exitCode: params.exitCode,
+          stdout: params.stdout,
+          stderr: params.stderr,
+          error: params.error,
+          durationMs: params.durationMs,
+          startedAt: existing.started_at ?? undefined,
+          finishedAt,
+        });
+      } catch {
+        // Best-effort attempt recording
+      }
+
+      // Legal state transition: running -> failed/timed_out -> retrying
+      await updateJobStatus(jobId, params.status, {
+        exitCode: params.exitCode,
+        stdout: params.stdout,
+        stderr: params.stderr,
+        error: params.error,
+        durationMs: params.durationMs,
+        finishedAt,
+      });
+
+      const nextRetryAt = new Date(Date.now() + delaySeconds * 1000);
+      const retryingJob = await updateJobStatus(jobId, 'retrying', {
+        nextRetryAt,
+      });
+
+      return retryingJob;
+    }
   }
 
   const updatedJob = await updateJobStatus(jobId, params.status, updates);
 
   // If entering terminal or running status, record attempt
-  if (params.status === 'running' || params.status === 'succeeded' || params.status === 'failed') {
+  if (params.status === 'running' || params.status === 'succeeded' || params.status === 'failed' || params.status === 'timed_out') {
     try {
       await recordJobAttempt({
         jobId: updatedJob.id,
@@ -79,6 +132,8 @@ export async function updateJobExecutionStatus(
         stderr: params.stderr,
         error: params.error,
         durationMs: params.durationMs,
+        startedAt: updatedJob.started_at ?? undefined,
+        finishedAt: updatedJob.finished_at ?? undefined,
       });
     } catch {
       // Best-effort attempt recording
@@ -86,20 +141,20 @@ export async function updateJobExecutionStatus(
   }
 
   // Check if all jobs for the workflow run have completed
-  if (['succeeded', 'failed', 'cancelled'].includes(params.status)) {
+  if (['succeeded', 'failed', 'cancelled', 'timed_out'].includes(params.status)) {
     const siblingJobs = await getJobsByWorkflowRun(updatedJob.workflow_run_id);
     const allTerminal = siblingJobs.every((j) =>
-      ['succeeded', 'failed', 'cancelled'].includes(j.status),
+      ['succeeded', 'failed', 'cancelled', 'timed_out'].includes(j.status),
     );
 
     if (allTerminal) {
-      const anyFailed = siblingJobs.some((j) => j.status === 'failed' || j.status === 'cancelled');
+      const anyFailed = siblingJobs.some((j) => j.status === 'failed' || j.status === 'cancelled' || j.status === 'timed_out');
       const totalDuration = siblingJobs.reduce((acc, j) => acc + (j.duration_ms ?? 0), 0);
       await updateWorkflowRun(updatedJob.workflow_run_id, {
         status: anyFailed ? 'failed' : 'succeeded',
         finished_at: new Date(),
         duration_ms: totalDuration,
-        error: anyFailed ? 'One or more jobs failed or were cancelled' : null,
+        error: anyFailed ? 'One or more jobs failed, timed out, or were cancelled' : null,
       });
     }
   }
@@ -128,6 +183,32 @@ export async function findExpiredLeasesService(
   gracePeriodSeconds: number = 0,
 ): Promise<JobRecord[]> {
   return findExpiredLeases(gracePeriodSeconds);
+}
+
+export async function dispatchDueRetries(): Promise<JobRecord[]> {
+  const dueJobs = await findDueRetryingJobs();
+  const requeued: JobRecord[] = [];
+
+  for (const job of dueJobs) {
+    try {
+      const requeuedJob = await requeueJobForRetry(job.id);
+      await enqueueJob({
+        jobId: requeuedJob.id,
+        workflowRunId: requeuedJob.workflow_run_id,
+        queuedAt: new Date().toISOString(),
+        attempt: requeuedJob.attempt,
+      });
+      requeued.push(requeuedJob);
+    } catch {
+      // Best-effort per job
+    }
+  }
+
+  return requeued;
+}
+
+export async function findDueRetryingJobsService(limit: number = 100): Promise<JobRecord[]> {
+  return findDueRetryingJobs(limit);
 }
 
 export { LeaseConflictError };

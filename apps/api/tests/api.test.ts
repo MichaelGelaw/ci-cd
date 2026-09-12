@@ -626,5 +626,151 @@ steps:
       expect(renewExpiredRes.json().error.code).toBe('LEASE_CONFLICT');
     });
   });
+
+  describe('Retries API', () => {
+    it('manages retry lifecycle: retrying transition, backoff dispatch, and final resolution', async () => {
+      // 1. Submit workflow with a step configured with retries: 1 (max_attempts = 2)
+      const submitRes = await app.inject({
+        method: 'POST',
+        url: '/workflows/runs',
+        headers: { 'content-type': 'application/json' },
+        payload: {
+          yaml: `
+name: retry-api-test
+steps:
+  - name: test-flaky
+    run: exit 1
+    retry:
+      max_attempts: 2
+      base_delay_seconds: 10
+      jitter: false
+`,
+        },
+      });
+
+      expect(submitRes.statusCode).toBe(201);
+      const submitBody = submitRes.json();
+      const runId = submitBody.run.id;
+      const jobId = submitBody.jobs[0].id;
+
+      expect(submitBody.jobs[0].max_attempts).toBe(2);
+      expect(submitBody.jobs[0].attempt).toBe(1);
+
+      // Transition job: queued -> assigned -> running
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/status`,
+        payload: { status: 'assigned', worker_id: 'worker-r1' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/status`,
+        payload: { status: 'running', worker_id: 'worker-r1' },
+      });
+
+      // 2. Report failure on attempt 1. Since attempt 1 < max_attempts (2), job transitions to 'retrying'
+      const failRes = await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/status`,
+        payload: {
+          status: 'failed',
+          exit_code: 1,
+          stderr: 'Temporary network failure',
+        },
+      });
+
+      expect(failRes.statusCode).toBe(200);
+      const failBody = failRes.json();
+      expect(failBody.job.status).toBe('retrying');
+      expect(failBody.job.next_retry_at).toBeTruthy();
+
+      // Workflow run should STILL be 'running' (not failed!)
+      const runCheck1 = await app.inject({
+        method: 'GET',
+        url: `/workflow-runs/${runId}`,
+      });
+      expect(runCheck1.json().run.status).toBe('running');
+
+      // Attempt history should record attempt 1 as failed
+      const attemptsRes = await app.inject({
+        method: 'GET',
+        url: `/jobs/${jobId}/attempts`,
+      });
+      expect(attemptsRes.json().attempts).toHaveLength(1);
+      expect(attemptsRes.json().attempts[0].status).toBe('failed');
+      expect(attemptsRes.json().attempts[0].attempt_number).toBe(1);
+
+      // Fast-forward next_retry_at into the past so it becomes due
+      const pool = getPool();
+      await pool.query(
+        "UPDATE jobs SET next_retry_at = NOW() - INTERVAL '10 seconds' WHERE id = $1;",
+        [jobId],
+      );
+
+      // GET /jobs/retries/due should list this job
+      const dueRes = await app.inject({
+        method: 'GET',
+        url: '/jobs/retries/due',
+      });
+      expect(dueRes.statusCode).toBe(200);
+      const dueBody = dueRes.json();
+      expect(dueBody.dueJobs.some((j: any) => j.id === jobId)).toBe(true);
+
+      // 3. POST /jobs/retries/dispatch should re-enqueue to 'queued' with attempt = 2
+      const dispatchRes = await app.inject({
+        method: 'POST',
+        url: '/jobs/retries/dispatch',
+      });
+      expect(dispatchRes.statusCode).toBe(200);
+      const dispatchBody = dispatchRes.json();
+      expect(dispatchBody.retried.some((j: any) => j.id === jobId)).toBe(true);
+
+      // Verify job is now queued with attempt 2
+      const jobCheck = await app.inject({
+        method: 'GET',
+        url: `/jobs/${jobId}`,
+      });
+      expect(jobCheck.json().job.status).toBe('queued');
+      expect(jobCheck.json().job.attempt).toBe(2);
+
+      // 4. Second attempt execution: queued -> assigned -> running -> succeeded
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/status`,
+        payload: { status: 'assigned', worker_id: 'worker-r2' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/status`,
+        payload: { status: 'running', worker_id: 'worker-r2' },
+      });
+      const succeedRes = await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/status`,
+        payload: {
+          status: 'succeeded',
+          exit_code: 0,
+          stdout: 'Success on retry!',
+        },
+      });
+      expect(succeedRes.statusCode).toBe(200);
+      expect(succeedRes.json().job.status).toBe('succeeded');
+
+      // Workflow run should now be 'succeeded'!
+      const runCheck2 = await app.inject({
+        method: 'GET',
+        url: `/workflow-runs/${runId}`,
+      });
+      expect(runCheck2.json().run.status).toBe('succeeded');
+
+      // Attempt history should contain both attempt 1 and attempt 2
+      const finalAttempts = await app.inject({
+        method: 'GET',
+        url: `/jobs/${jobId}/attempts`,
+      });
+      expect(finalAttempts.json().attempts).toHaveLength(2);
+    });
+  });
 });
+
 

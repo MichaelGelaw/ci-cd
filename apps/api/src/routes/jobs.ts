@@ -7,6 +7,8 @@ import {
   updateJobExecutionStatus,
   renewJobLeaseService,
   findExpiredLeasesService,
+  dispatchDueRetries,
+  findDueRetryingJobsService,
   LeaseConflictError,
 } from '../services/job-service.js';
 
@@ -30,6 +32,40 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       });
     }
   });
+
+  app.get('/jobs/retries/due', async (request, reply) => {
+    const query = (request.query ?? {}) as { limit?: string };
+    const limit = query.limit ? parseInt(query.limit, 10) : 100;
+
+    try {
+      const dueJobs = await findDueRetryingJobsService(limit);
+      return reply.status(200).send({ dueJobs, count: dueJobs.length });
+    } catch (err) {
+      const message = (err as Error).message;
+      return reply.status(500).send({
+        error: {
+          message,
+          code: 'INTERNAL_ERROR',
+        },
+      });
+    }
+  });
+
+  app.post('/jobs/retries/dispatch', async (_request, reply) => {
+    try {
+      const retried = await dispatchDueRetries();
+      return reply.status(200).send({ retried, count: retried.length });
+    } catch (err) {
+      const message = (err as Error).message;
+      return reply.status(500).send({
+        error: {
+          message,
+          code: 'INTERNAL_ERROR',
+        },
+      });
+    }
+  });
+
 
   app.get('/jobs/:id', async (request, reply) => {
     const { id } = request.params as { id: string };

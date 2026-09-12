@@ -922,6 +922,15 @@ export async function recordJobAttempt(params: {
       duration_ms
     )
     VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, NOW()), $9, $10)
+    ON CONFLICT (job_id, attempt_number)
+    DO UPDATE SET
+      status = EXCLUDED.status,
+      exit_code = COALESCE(EXCLUDED.exit_code, job_attempts.exit_code),
+      stdout = CASE WHEN EXCLUDED.stdout <> '' THEN EXCLUDED.stdout ELSE job_attempts.stdout END,
+      stderr = CASE WHEN EXCLUDED.stderr <> '' THEN EXCLUDED.stderr ELSE job_attempts.stderr END,
+      error = COALESCE(EXCLUDED.error, job_attempts.error),
+      finished_at = COALESCE(EXCLUDED.finished_at, job_attempts.finished_at),
+      duration_ms = COALESCE(EXCLUDED.duration_ms, job_attempts.duration_ms)
     RETURNING
       id,
       job_id,
