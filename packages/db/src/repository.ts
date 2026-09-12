@@ -10,21 +10,44 @@ import type {
   ArtifactRecord,
   CreateArtifactParams,
   ArtifactConfig,
+  RepositoryRecord,
+  CreateRepositoryParams,
+  RegisteredWorkflowRecord,
+  CreateRegisteredWorkflowParams,
 } from '@mini-ci/types';
 import { randomUUID } from 'node:crypto';
 import { getPool } from './connection.js';
 import { assertValidTransition } from './state-machine.js';
 import { calculateRetryDelay } from './retry.js';
 
+export interface CreateWorkflowRunOptions {
+  repositoryId?: string | null;
+  triggerEvent?: string | null;
+  triggerSender?: string | null;
+  commitSha?: string | null;
+  commitRef?: string | null;
+  commitMessage?: string | null;
+}
+
 export async function createWorkflowRun(
   workflowName: string,
   status: RunStatus = 'running',
+  options?: CreateWorkflowRunOptions,
 ): Promise<WorkflowRunRecord> {
   const pool = getPool();
   const { rows } = await pool.query<WorkflowRunRecord>(
     `
-    INSERT INTO workflow_runs (workflow_name, status)
-    VALUES ($1, $2)
+    INSERT INTO workflow_runs (
+      workflow_name,
+      status,
+      repository_id,
+      trigger_event,
+      trigger_sender,
+      commit_sha,
+      commit_ref,
+      commit_message
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     RETURNING
       id,
       workflow_name,
@@ -33,9 +56,24 @@ export async function createWorkflowRun(
       finished_at::text,
       duration_ms,
       error,
-      created_at::text;
+      created_at::text,
+      repository_id,
+      trigger_event,
+      trigger_sender,
+      commit_sha,
+      commit_ref,
+      commit_message;
     `,
-    [workflowName, status],
+    [
+      workflowName,
+      status,
+      options?.repositoryId ?? null,
+      options?.triggerEvent ?? null,
+      options?.triggerSender ?? null,
+      options?.commitSha ?? null,
+      options?.commitRef ?? null,
+      options?.commitMessage ?? null,
+    ],
   );
 
   return rows[0]!;
@@ -93,7 +131,13 @@ export async function updateWorkflowRun(
       finished_at::text,
       duration_ms,
       error,
-      created_at::text;
+      created_at::text,
+      repository_id,
+      trigger_event,
+      trigger_sender,
+      commit_sha,
+      commit_ref,
+      commit_message;
     `,
     values,
   );
@@ -117,7 +161,13 @@ export async function getWorkflowRun(id: string): Promise<WorkflowRunRecord | nu
       finished_at::text,
       duration_ms,
       error,
-      created_at::text
+      created_at::text,
+      repository_id,
+      trigger_event,
+      trigger_sender,
+      commit_sha,
+      commit_ref,
+      commit_message
     FROM workflow_runs
     WHERE id = $1;
     `,
@@ -141,7 +191,13 @@ export async function listWorkflowRuns(
       finished_at::text,
       duration_ms,
       error,
-      created_at::text
+      created_at::text,
+      repository_id,
+      trigger_event,
+      trigger_sender,
+      commit_sha,
+      commit_ref,
+      commit_message
     FROM workflow_runs
     ORDER BY created_at DESC
     LIMIT $1 OFFSET $2;
@@ -2122,5 +2178,199 @@ export async function evaluateAndPromoteDependentJobs(
 
   return { promoted: allPromoted, cancelled: allCancelled };
 }
+
+// ============================================================================
+// Repository & Workflow Registration Methods (Milestone 18)
+// ============================================================================
+
+export async function createRepository(params: CreateRepositoryParams): Promise<RepositoryRecord> {
+  const pool = getPool();
+  const { rows } = await pool.query<RepositoryRecord>(
+    `
+    INSERT INTO repositories (name, url, default_branch, webhook_secret)
+    VALUES ($1, $2, $3, $4)
+    RETURNING
+      id,
+      name,
+      url,
+      default_branch,
+      webhook_secret,
+      created_at::text,
+      updated_at::text;
+    `,
+    [
+      params.name,
+      params.url ?? null,
+      params.default_branch ?? 'main',
+      params.webhook_secret ?? null,
+    ],
+  );
+
+  return rows[0]!;
+}
+
+export async function getRepository(id: string): Promise<RepositoryRecord | null> {
+  const pool = getPool();
+  const { rows } = await pool.query<RepositoryRecord>(
+    `
+    SELECT
+      id,
+      name,
+      url,
+      default_branch,
+      webhook_secret,
+      created_at::text,
+      updated_at::text
+    FROM repositories
+    WHERE id = $1;
+    `,
+    [id],
+  );
+
+  return rows[0] ?? null;
+}
+
+export async function getRepositoryByName(name: string): Promise<RepositoryRecord | null> {
+  const pool = getPool();
+  const { rows } = await pool.query<RepositoryRecord>(
+    `
+    SELECT
+      id,
+      name,
+      url,
+      default_branch,
+      webhook_secret,
+      created_at::text,
+      updated_at::text
+    FROM repositories
+    WHERE name = $1;
+    `,
+    [name],
+  );
+
+  return rows[0] ?? null;
+}
+
+export async function listRepositories(
+  limit: number = 20,
+  offset: number = 0,
+): Promise<RepositoryRecord[]> {
+  const pool = getPool();
+  const { rows } = await pool.query<RepositoryRecord>(
+    `
+    SELECT
+      id,
+      name,
+      url,
+      default_branch,
+      webhook_secret,
+      created_at::text,
+      updated_at::text
+    FROM repositories
+    ORDER BY created_at DESC
+    LIMIT $1 OFFSET $2;
+    `,
+    [limit, offset],
+  );
+
+  return rows;
+}
+
+export async function deleteRepository(id: string): Promise<boolean> {
+  const pool = getPool();
+  const { rowCount } = await pool.query(
+    `DELETE FROM repositories WHERE id = $1;`,
+    [id],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+export async function createRegisteredWorkflow(
+  params: CreateRegisteredWorkflowParams,
+): Promise<RegisteredWorkflowRecord> {
+  const pool = getPool();
+  const { rows } = await pool.query<RegisteredWorkflowRecord>(
+    `
+    INSERT INTO registered_workflows (repository_id, name, path, content, is_active)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (repository_id, name)
+    DO UPDATE SET
+      path = EXCLUDED.path,
+      content = EXCLUDED.content,
+      is_active = EXCLUDED.is_active,
+      updated_at = NOW()
+    RETURNING
+      id,
+      repository_id,
+      name,
+      path,
+      content,
+      is_active,
+      created_at::text,
+      updated_at::text;
+    `,
+    [
+      params.repositoryId,
+      params.name,
+      params.path ?? '.mini-ci/workflow.yml',
+      params.content,
+      params.isActive ?? true,
+    ],
+  );
+
+  return rows[0]!;
+}
+
+export async function getRegisteredWorkflow(id: string): Promise<RegisteredWorkflowRecord | null> {
+  const pool = getPool();
+  const { rows } = await pool.query<RegisteredWorkflowRecord>(
+    `
+    SELECT
+      id,
+      repository_id,
+      name,
+      path,
+      content,
+      is_active,
+      created_at::text,
+      updated_at::text
+    FROM registered_workflows
+    WHERE id = $1;
+    `,
+    [id],
+  );
+
+  return rows[0] ?? null;
+}
+
+export async function listRegisteredWorkflows(
+  repositoryId: string,
+  onlyActive: boolean = true,
+): Promise<RegisteredWorkflowRecord[]> {
+  const pool = getPool();
+  let queryStr = `
+    SELECT
+      id,
+      repository_id,
+      name,
+      path,
+      content,
+      is_active,
+      created_at::text,
+      updated_at::text
+    FROM registered_workflows
+    WHERE repository_id = $1
+  `;
+  const values: unknown[] = [repositoryId];
+
+  if (onlyActive) {
+    queryStr += ' AND is_active = TRUE';
+  }
+  queryStr += ' ORDER BY created_at ASC;';
+
+  const { rows } = await pool.query<RegisteredWorkflowRecord>(queryStr, values);
+  return rows;
+}
+
 
 

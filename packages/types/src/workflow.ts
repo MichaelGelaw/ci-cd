@@ -39,8 +39,23 @@ export interface JobDefinition {
   env?: Record<string, string>;
 }
 
+export interface EventTriggerFilter {
+  branches?: string[];
+  types?: string[];
+}
+
+export type WorkflowTriggerConfig =
+  | string
+  | string[]
+  | {
+      push?: EventTriggerFilter | null;
+      pull_request?: EventTriggerFilter | null;
+      [event: string]: EventTriggerFilter | Record<string, unknown> | null | undefined;
+    };
+
 export interface WorkflowDefinition {
   name: string;
+  on?: WorkflowTriggerConfig;
   image?: string;
   steps?: StepDefinition[];
   jobs?: Record<string, JobDefinition>;
@@ -64,6 +79,7 @@ export interface NormalizedJobDefinition {
 
 export interface NormalizedWorkflowDefinition {
   name: string;
+  on?: WorkflowTriggerConfig;
   image?: string;
   jobs: Record<string, NormalizedJobDefinition>;
   topologicalOrder: string[];
@@ -127,6 +143,12 @@ export interface WorkflowRunRecord {
   duration_ms: number | null;
   error: string | null;
   created_at: string;
+  repository_id?: string | null;
+  trigger_event?: string | null;
+  trigger_sender?: string | null;
+  commit_sha?: string | null;
+  commit_ref?: string | null;
+  commit_message?: string | null;
 }
 
 export interface JobRecord {
@@ -269,5 +291,119 @@ export interface CreateArtifactParams {
   storagePath: string;
   checksum?: string | null;
 }
+
+// Repository & Workflow Registration (Milestone 18)
+
+export interface RepositoryRecord {
+  id: string;
+  name: string;
+  url: string | null;
+  default_branch: string;
+  webhook_secret: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateRepositoryParams {
+  name: string;
+  url?: string | null;
+  default_branch?: string;
+  webhook_secret?: string | null;
+}
+
+export interface RegisteredWorkflowRecord {
+  id: string;
+  repository_id: string;
+  name: string;
+  path: string;
+  content: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateRegisteredWorkflowParams {
+  repositoryId: string;
+  name: string;
+  path?: string;
+  content: string;
+  isActive?: boolean;
+}
+
+// GitHub Webhook Types (Milestone 18)
+
+export interface GitHubPushPayload {
+  ref?: string;
+  before?: string;
+  after?: string;
+  deleted?: boolean;
+  created?: boolean;
+  repository?: {
+    name?: string;
+    full_name?: string;
+    clone_url?: string;
+    default_branch?: string;
+  };
+  pusher?: {
+    name?: string;
+    email?: string;
+  };
+  sender?: {
+    login?: string;
+  };
+  head_commit?: {
+    id?: string;
+    message?: string;
+    timestamp?: string;
+    author?: {
+      name?: string;
+      email?: string;
+    };
+  };
+}
+
+export interface GitHubPullRequestPayload {
+  action?: string;
+  number?: number;
+  pull_request?: {
+    title?: string;
+    head?: {
+      ref?: string;
+      sha?: string;
+    };
+    base?: {
+      ref?: string;
+      sha?: string;
+    };
+  };
+  repository?: {
+    name?: string;
+    full_name?: string;
+  };
+  sender?: {
+    login?: string;
+  };
+}
+
+export interface GitHubPingPayload {
+  zen?: string;
+  hook_id?: number;
+  repository?: {
+    name?: string;
+    full_name?: string;
+  };
+}
+
+export interface WebhookTriggerResult {
+  event: string;
+  repository: string;
+  matchedWorkflows: number;
+  runs: WorkflowRunRecord[];
+  action?: string;
+  ref?: string;
+  commitSha?: string;
+  message?: string;
+}
+
 
 

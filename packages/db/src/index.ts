@@ -40,8 +40,17 @@ export {
   deleteArtifact,
   findStagedJobs,
   evaluateAndPromoteDependentJobs,
+  createRepository,
+  getRepository,
+  getRepositoryByName,
+  listRepositories,
+  deleteRepository,
+  createRegisteredWorkflow,
+  getRegisteredWorkflow,
+  listRegisteredWorkflows,
 } from './repository.js';
 export type {
+  CreateWorkflowRunOptions,
   FindRecoverableJobsOptions,
   RecoverJobOptions,
   RecoverJobResult,

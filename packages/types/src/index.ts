@@ -28,5 +28,16 @@ export type {
   ArtifactConfig,
   ArtifactRecord,
   CreateArtifactParams,
+  EventTriggerFilter,
+  WorkflowTriggerConfig,
+  RepositoryRecord,
+  CreateRepositoryParams,
+  RegisteredWorkflowRecord,
+  CreateRegisteredWorkflowParams,
+  GitHubPushPayload,
+  GitHubPullRequestPayload,
+  GitHubPingPayload,
+  WebhookTriggerResult,
 } from './workflow.js';
+
 

@@ -38,6 +38,14 @@ import {
   deleteArtifact,
   findStagedJobs,
   evaluateAndPromoteDependentJobs,
+  createRepository,
+  getRepository,
+  getRepositoryByName,
+  listRepositories,
+  deleteRepository,
+  createRegisteredWorkflow,
+  getRegisteredWorkflow,
+  listRegisteredWorkflows,
   getPool,
 } from '../src/index.js';
 
@@ -824,6 +832,98 @@ describe('Database Repository', () => {
     // Workflow run should now be marked as failed
     const updatedRun = await getWorkflowRun(run.id);
     expect(updatedRun?.status).toBe('failed');
+  });
+
+  it('creates and manages repositories and registered workflows', async () => {
+    const repoName = `test-org/repo-${Date.now()}`;
+    const repo = await createRepository({
+      name: repoName,
+      url: 'https://github.com/test-org/repo',
+      default_branch: 'main',
+      webhook_secret: 'supersecret',
+    });
+
+    expect(repo.id).toBeDefined();
+    expect(repo.name).toBe(repoName);
+    expect(repo.url).toBe('https://github.com/test-org/repo');
+    expect(repo.default_branch).toBe('main');
+    expect(repo.webhook_secret).toBe('supersecret');
+
+    // Fetch by id and by name
+    const byId = await getRepository(repo.id);
+    expect(byId?.name).toBe(repoName);
+
+    const byName = await getRepositoryByName(repoName);
+    expect(byName?.id).toBe(repo.id);
+
+    // List repositories
+    const list = await listRepositories(10, 0);
+    expect(list.some((r) => r.id === repo.id)).toBe(true);
+
+    // Register workflows
+    const workflow1 = await createRegisteredWorkflow({
+      repositoryId: repo.id,
+      name: 'ci',
+      path: '.mini-ci/ci.yml',
+      content: 'name: CI\non: push\nsteps:\n  - run: echo ci',
+      isActive: true,
+    });
+
+    const workflow2 = await createRegisteredWorkflow({
+      repositoryId: repo.id,
+      name: 'release',
+      path: '.mini-ci/release.yml',
+      content: 'name: Release\non: push\nsteps:\n  - run: echo release',
+      isActive: false,
+    });
+
+    expect(workflow1.id).toBeDefined();
+    expect(workflow1.name).toBe('ci');
+    expect(workflow1.is_active).toBe(true);
+
+    // Fetch registered workflow by id
+    const fetchedWf = await getRegisteredWorkflow(workflow1.id);
+    expect(fetchedWf?.content).toContain('name: CI');
+
+    // List active registered workflows
+    const activeWorkflows = await listRegisteredWorkflows(repo.id, true);
+    expect(activeWorkflows).toHaveLength(1);
+    expect(activeWorkflows[0]?.name).toBe('ci');
+
+    // List all registered workflows
+    const allWorkflows = await listRegisteredWorkflows(repo.id, false);
+    expect(allWorkflows).toHaveLength(2);
+
+    // Create workflow run with trigger metadata
+    const run = await createWorkflowRun('CI', 'running', {
+      repositoryId: repo.id,
+      triggerEvent: 'push',
+      triggerSender: 'octocat',
+      commitSha: '4b825dc642cb6eb9a060e54bf8d69288fbee4904',
+      commitRef: 'refs/heads/main',
+      commitMessage: 'feat: add github webhook trigger support',
+    });
+
+    expect(run.repository_id).toBe(repo.id);
+    expect(run.trigger_event).toBe('push');
+    expect(run.trigger_sender).toBe('octocat');
+    expect(run.commit_sha).toBe('4b825dc642cb6eb9a060e54bf8d69288fbee4904');
+    expect(run.commit_ref).toBe('refs/heads/main');
+    expect(run.commit_message).toBe('feat: add github webhook trigger support');
+
+    const fetchedRun = await getWorkflowRun(run.id);
+    expect(fetchedRun?.commit_sha).toBe('4b825dc642cb6eb9a060e54bf8d69288fbee4904');
+    expect(fetchedRun?.trigger_event).toBe('push');
+
+    // Delete repository cascades to workflows
+    const deleted = await deleteRepository(repo.id);
+    expect(deleted).toBe(true);
+
+    const checkRepo = await getRepository(repo.id);
+    expect(checkRepo).toBeNull();
+
+    const checkWf = await getRegisteredWorkflow(workflow1.id);
+    expect(checkWf).toBeNull();
   });
 });
 

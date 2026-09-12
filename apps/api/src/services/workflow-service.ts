@@ -1,4 +1,4 @@
-import type { WorkflowRunRecord, JobRecord, WorkflowDefinition } from '@mini-ci/types';
+import type { WorkflowRunRecord, JobRecord, WorkflowDefinition, JobStatus } from '@mini-ci/types';
 import {
   createWorkflowRun,
   getWorkflowRun,
