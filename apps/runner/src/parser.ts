@@ -29,6 +29,12 @@ export function parseWorkflow(content: string): WorkflowDefinition {
     throw new Error('Workflow "steps" array must not be empty');
   }
 
+  if (obj['image'] !== undefined) {
+    if (typeof obj['image'] !== 'string' || obj['image'].trim() === '') {
+      throw new Error('Workflow "image" must be a non-empty string');
+    }
+  }
+
   const steps: StepDefinition[] = obj['steps'].map((step: unknown, i: number) => {
     if (step === null || typeof step !== 'object') {
       throw new Error(`Step ${i + 1} must be a YAML mapping`);
@@ -49,6 +55,13 @@ export function parseWorkflow(content: string): WorkflowDefinition {
       def.name = s['name'];
     }
 
+    if (s['image'] !== undefined) {
+      if (typeof s['image'] !== 'string' || s['image'].trim() === '') {
+        throw new Error(`Step ${i + 1} "image" must be a non-empty string`);
+      }
+      def.image = s['image'];
+    }
+
     if (s['timeout_seconds'] !== undefined) {
       if (typeof s['timeout_seconds'] !== 'number' || s['timeout_seconds'] <= 0) {
         throw new Error(`Step ${i + 1} "timeout_seconds" must be a positive number`);
@@ -59,8 +72,14 @@ export function parseWorkflow(content: string): WorkflowDefinition {
     return def;
   });
 
-  return {
+  const workflow: WorkflowDefinition = {
     name: obj['name'],
     steps,
   };
+
+  if (obj['image'] !== undefined) {
+    workflow.image = obj['image'] as string;
+  }
+
+  return workflow;
 }
