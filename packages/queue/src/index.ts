@@ -26,4 +26,14 @@ export {
   clearBufferedLogs,
   subscribeJobLogs,
 } from './log-stream.js';
+export {
+  getJobCancelChannel,
+  getJobCancelledKey,
+  publishJobCancellation,
+  isJobCancelled,
+  clearJobCancellation,
+  subscribeJobCancellation,
+} from './cancellation.js';
+export type { JobCancellationEvent } from './cancellation.js';
+
 
