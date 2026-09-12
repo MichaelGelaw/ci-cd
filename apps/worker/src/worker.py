@@ -1,4 +1,5 @@
 import logging
+import platform
 import time
 from typing import Optional
 from src.config import WorkerConfig
@@ -15,6 +16,41 @@ class Worker:
         self.consumer = QueueConsumer(self.config.redis_url)
         self.api = ApiClient(self.config.api_url)
         self.running = False
+        self.is_registered = False
+
+    def register(self) -> bool:
+        try:
+            metadata = {
+                "system": platform.system(),
+                "release": platform.release(),
+                "machine": platform.machine(),
+                "python": platform.python_version(),
+            }
+            self.api.register_worker(
+                worker_id=self.config.worker_id,
+                name=self.config.worker_name,
+                address=self.config.worker_address,
+                tags=list(self.config.worker_tags),
+                metadata=metadata,
+            )
+            self.is_registered = True
+            logger.info(
+                f"Registered worker {self.config.worker_id} ({self.config.worker_name}) with control plane"
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                f"Failed to register worker {self.config.worker_id} with control plane: {e}"
+            )
+            return False
+
+    def heartbeat(self, status: Optional[str] = None) -> bool:
+        try:
+            self.api.heartbeat(self.config.worker_id, status=status)
+            return True
+        except Exception as e:
+            logger.warning(f"Heartbeat failed for worker {self.config.worker_id}: {e}")
+            return False
 
     def run_once(self, timeout_seconds: int = 1) -> bool:
         message = self.consumer.pop_job(timeout_seconds)
@@ -43,6 +79,9 @@ class Worker:
             self.consumer.acknowledge_job(job_id)
             return
 
+        # Mark worker busy
+        self.heartbeat(status="busy")
+
         # Transition: queued -> assigned
         try:
             self.api.update_job_status(job_id, status="assigned", worker_id=self.config.worker_id)
@@ -54,6 +93,7 @@ class Worker:
             self.api.update_job_status(job_id, status="running", worker_id=self.config.worker_id)
         except Exception as e:
             logger.error(f"Could not transition job {job_id} to running: {e}")
+            self.heartbeat(status="ready")
             self.consumer.acknowledge_job(job_id)
             return
 
@@ -85,11 +125,13 @@ class Worker:
         except Exception as e:
             logger.error(f"Failed to report final status for job {job_id}: {e}")
 
-        # Acknowledge in Redis
+        # Return worker to ready state and acknowledge in Redis
+        self.heartbeat(status="ready")
         self.consumer.acknowledge_job(job_id)
         logger.info(f"Job {job_id} finished with status {final_status}")
 
     def run_forever(self) -> None:
+        self.register()
         self.running = True
         logger.info(f"Worker {self.config.worker_id} listening for jobs...")
         while self.running:

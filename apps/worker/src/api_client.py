@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import requests
 
 
@@ -39,6 +39,50 @@ class ApiClient:
 
         resp = requests.post(
             f"{self.base_url}/jobs/{job_id}/status",
+            json=payload,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def register_worker(
+        self,
+        worker_id: str,
+        name: str,
+        address: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "id": worker_id,
+            "name": name,
+        }
+        if address is not None:
+            payload["address"] = address
+        if tags is not None:
+            payload["tags"] = tags
+        if metadata is not None:
+            payload["metadata"] = metadata
+
+        resp = requests.post(
+            f"{self.base_url}/workers/register",
+            json=payload,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def heartbeat(
+        self,
+        worker_id: str,
+        status: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if status is not None:
+            payload["status"] = status
+
+        resp = requests.post(
+            f"{self.base_url}/workers/{worker_id}/heartbeat",
             json=payload,
             timeout=10,
         )

@@ -85,3 +85,54 @@ def test_worker_run_once_executes_and_reports():
     # Verify Redis queue is acknowledged and empty
     assert r.llen(QueueConsumer.QUEUE_KEY) == 0
     assert r.llen(QueueConsumer.PROCESSING_KEY) == 0
+
+
+def test_worker_register_calls_api():
+    config = WorkerConfig(
+        worker_id="worker-reg-test",
+        worker_name="custom-node-name",
+        worker_address="127.0.0.1:8080",
+        worker_tags=["docker", "pytest"],
+    )
+    worker = Worker(config)
+    worker.api = MagicMock()
+    worker.api.register_worker.return_value = {
+        "worker": {
+            "id": "worker-reg-test",
+            "name": "custom-node-name",
+            "status": "ready",
+        }
+    }
+
+    success = worker.register()
+    assert success is True
+    assert worker.is_registered is True
+    worker.api.register_worker.assert_called_once()
+    kwargs = worker.api.register_worker.call_args.kwargs
+    assert kwargs["worker_id"] == "worker-reg-test"
+    assert kwargs["name"] == "custom-node-name"
+    assert kwargs["address"] == "127.0.0.1:8080"
+    assert kwargs["tags"] == ["docker", "pytest"]
+    assert "system" in kwargs["metadata"]
+
+
+def test_worker_register_handles_api_failure():
+    config = WorkerConfig(worker_id="worker-failing-reg")
+    worker = Worker(config)
+    worker.api = MagicMock()
+    worker.api.register_worker.side_effect = Exception("Connection refused")
+
+    success = worker.register()
+    assert success is False
+    assert worker.is_registered is False
+
+
+def test_worker_heartbeat_calls_api():
+    config = WorkerConfig(worker_id="worker-hb-test")
+    worker = Worker(config)
+    worker.api = MagicMock()
+    worker.api.heartbeat.return_value = {"worker": {"id": "worker-hb-test", "status": "busy"}}
+
+    success = worker.heartbeat(status="busy")
+    assert success is True
+    worker.api.heartbeat.assert_called_once_with("worker-hb-test", status="busy")
