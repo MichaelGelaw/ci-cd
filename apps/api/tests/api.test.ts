@@ -1368,6 +1368,207 @@ jobs:
       expect(submitRes.statusCode).toBe(400);
       expect(submitRes.json().error.message).toContain('Circular dependency detected');
     });
+
+    it('dynamically promotes DAG jobs as dependencies succeed and completes the workflow', async () => {
+      const dagYaml = `
+name: branching-dag-pipeline
+jobs:
+  build:
+    name: Build
+    run: echo "build"
+  test:
+    name: Test
+    needs: [build]
+    run: echo "test"
+  lint:
+    name: Lint
+    needs: [build]
+    run: echo "lint"
+  deploy:
+    name: Deploy
+    needs: [test, lint]
+    run: echo "deploy"
+`;
+
+      const submitRes = await app.inject({
+        method: 'POST',
+        url: '/workflows/runs',
+        headers: { 'content-type': 'application/x-yaml' },
+        payload: dagYaml,
+      });
+
+      expect(submitRes.statusCode).toBe(201);
+      const { run, jobs } = submitRes.json();
+
+      const buildJob = jobs.find((j: any) => j.job_key === 'build');
+      const testJob = jobs.find((j: any) => j.job_key === 'test');
+      const lintJob = jobs.find((j: any) => j.job_key === 'lint');
+      const deployJob = jobs.find((j: any) => j.job_key === 'deploy');
+
+      // Initial state: build is queued; test, lint, deploy are created
+      expect(buildJob.status).toBe('queued');
+      expect(testJob.status).toBe('created');
+      expect(lintJob.status).toBe('created');
+      expect(deployJob.status).toBe('created');
+
+      // 1. Advance build: queued -> assigned -> running -> succeeded
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${buildJob.id}/status`,
+        payload: { status: 'assigned' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${buildJob.id}/status`,
+        payload: { status: 'running' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${buildJob.id}/status`,
+        payload: { status: 'succeeded', exitCode: 0 },
+      });
+
+      // After build succeeds: test and lint should both be queued, deploy is still created
+      const runAfterBuild = await app.inject({
+        method: 'GET',
+        url: `/workflow-runs/${run.id}`,
+      });
+      const jobsAfterBuild = runAfterBuild.json().jobs;
+      const testAfterBuild = jobsAfterBuild.find((j: any) => j.job_key === 'test');
+      const lintAfterBuild = jobsAfterBuild.find((j: any) => j.job_key === 'lint');
+      const deployAfterBuild = jobsAfterBuild.find((j: any) => j.job_key === 'deploy');
+
+      expect(testAfterBuild.status).toBe('queued');
+      expect(lintAfterBuild.status).toBe('queued');
+      expect(deployAfterBuild.status).toBe('created');
+
+      // 2. Complete test only: deploy must still remain created
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${testJob.id}/status`,
+        payload: { status: 'assigned' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${testJob.id}/status`,
+        payload: { status: 'running' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${testJob.id}/status`,
+        payload: { status: 'succeeded', exitCode: 0 },
+      });
+
+      const checkDeployStillCreated = await app.inject({
+        method: 'GET',
+        url: `/jobs/${deployJob.id}`,
+      });
+      expect(checkDeployStillCreated.json().job.status).toBe('created');
+
+      // 3. Complete lint: now all dependencies of deploy (test, lint) have succeeded!
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${lintJob.id}/status`,
+        payload: { status: 'assigned' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${lintJob.id}/status`,
+        payload: { status: 'running' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${lintJob.id}/status`,
+        payload: { status: 'succeeded', exitCode: 0 },
+      });
+
+      // deploy should now be promoted to queued
+      const checkDeployQueued = await app.inject({
+        method: 'GET',
+        url: `/jobs/${deployJob.id}`,
+      });
+      expect(checkDeployQueued.json().job.status).toBe('queued');
+
+      // 4. Complete deploy: entire workflow run should become succeeded
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${deployJob.id}/status`,
+        payload: { status: 'assigned' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${deployJob.id}/status`,
+        payload: { status: 'running' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${deployJob.id}/status`,
+        payload: { status: 'succeeded', exitCode: 0 },
+      });
+
+      const finalRun = await app.inject({
+        method: 'GET',
+        url: `/workflow-runs/${run.id}`,
+      });
+      expect(finalRun.json().run.status).toBe('succeeded');
+    });
+
+    it('prunes and cancels downstream DAG jobs when an upstream job fails', async () => {
+      const failDagYaml = `
+name: failing-dag-pipeline
+jobs:
+  step_a:
+    run: echo "a"
+  step_b:
+    needs: [step_a]
+    run: echo "b"
+  step_c:
+    needs: [step_b]
+    run: echo "c"
+`;
+
+      const submitRes = await app.inject({
+        method: 'POST',
+        url: '/workflows/runs',
+        headers: { 'content-type': 'application/x-yaml' },
+        payload: failDagYaml,
+      });
+
+      expect(submitRes.statusCode).toBe(201);
+      const { run, jobs } = submitRes.json();
+
+      const stepA = jobs.find((j: any) => j.job_key === 'step_a');
+      const stepB = jobs.find((j: any) => j.job_key === 'step_b');
+      const stepC = jobs.find((j: any) => j.job_key === 'step_c');
+
+      // Fail step_a: queued -> assigned -> running -> failed
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${stepA.id}/status`,
+        payload: { status: 'assigned' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${stepA.id}/status`,
+        payload: { status: 'running' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${stepA.id}/status`,
+        payload: { status: 'failed', exitCode: 1, error: 'Command failed' },
+      });
+
+      // Both step_b and step_c should be cascaded to cancelled
+      const getB = await app.inject({ method: 'GET', url: `/jobs/${stepB.id}` });
+      const getC = await app.inject({ method: 'GET', url: `/jobs/${stepC.id}` });
+
+      expect(getB.json().job.status).toBe('cancelled');
+      expect(getC.json().job.status).toBe('cancelled');
+
+      // Workflow run should be marked failed
+      const getRun = await app.inject({ method: 'GET', url: `/workflow-runs/${run.id}` });
+      expect(getRun.json().run.status).toBe('failed');
+    });
   });
 });
 

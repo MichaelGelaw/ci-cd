@@ -22,6 +22,7 @@ import {
   recoverJob,
   recoverStaleJobs,
   LeaseConflictError,
+  evaluateAndPromoteDependentJobs,
 } from '@mini-ci/db';
 import type {
   FindRecoverableJobsOptions,
@@ -76,6 +77,13 @@ export async function cancelJob(
     });
   } catch {
     // Best-effort attempt recording
+  }
+
+  // Evaluate DAG dependencies to cancel downstream jobs
+  try {
+    await evaluateAndPromoteDependentJobs(cancelledJob.workflow_run_id);
+  } catch {
+    // Best effort
   }
 
   // Check if all sibling jobs are now terminal
@@ -195,6 +203,29 @@ export async function updateJobExecutionStatus(
       });
     } catch {
       // Best-effort attempt recording
+    }
+  }
+
+  // Advance DAG dependencies or prune unreachable dependents
+  if (params.status === 'succeeded') {
+    try {
+      const { promoted } = await evaluateAndPromoteDependentJobs(updatedJob.workflow_run_id);
+      for (const p of promoted) {
+        await enqueueJob({
+          jobId: p.id,
+          workflowRunId: p.workflow_run_id,
+          queuedAt: p.created_at,
+          attempt: p.attempt,
+        });
+      }
+    } catch {
+      // Best effort
+    }
+  } else if (params.status === 'failed' || params.status === 'cancelled' || params.status === 'timed_out') {
+    try {
+      await evaluateAndPromoteDependentJobs(updatedJob.workflow_run_id);
+    } catch {
+      // Best effort
     }
   }
 
