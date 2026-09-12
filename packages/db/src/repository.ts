@@ -1565,7 +1565,7 @@ export async function recoverJob(
         };
       } else {
         // Transition to retrying with exponential backoff
-        const delaySeconds = calculateRetryDelay(job.attempt, job.retry_policy);
+        const delaySeconds = calculateRetryDelay(job.attempt, job.retry_policy ?? undefined);
         const nextRetryAt = new Date(Date.now() + delaySeconds * 1000);
 
         const { rows: retryingRows } = await client.query<JobRecord>(

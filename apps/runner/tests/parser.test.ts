@@ -14,10 +14,10 @@ steps:
 
     expect(result.name).toBe('test');
     expect(result.steps).toHaveLength(2);
-    expect(result.steps[0]!.run).toBe('echo hello');
-    expect(result.steps[0]!.name).toBeUndefined();
-    expect(result.steps[1]!.run).toBe('echo world');
-    expect(result.steps[1]!.name).toBe('greet');
+    expect(result.steps![0]!.run).toBe('echo hello');
+    expect(result.steps![0]!.name).toBeUndefined();
+    expect(result.steps![1]!.run).toBe('echo world');
+    expect(result.steps![1]!.name).toBe('greet');
   });
 
   it('parses timeout_seconds', () => {
@@ -28,7 +28,7 @@ steps:
     timeout_seconds: 5
 `;
     const result = parseWorkflow(yaml);
-    expect(result.steps[0]!.timeout_seconds).toBe(5);
+    expect(result.steps![0]!.timeout_seconds).toBe(5);
   });
 
   it('throws when name is missing', () => {
@@ -112,8 +112,8 @@ steps:
       retry_on_timeout: true
 `;
     const result = parseWorkflow(yaml);
-    expect(result.steps[0]!.retries).toBe(2);
-    expect(result.steps[1]!.retry).toEqual({
+    expect(result.steps![0]!.retries).toBe(2);
+    expect(result.steps![1]!.retry).toEqual({
       max_attempts: 4,
       base_delay_seconds: 1.5,
       max_delay_seconds: 10,
@@ -188,14 +188,14 @@ jobs:
     expect(jobs.build?.name).toBe('Build Application');
     expect(jobs.build?.image).toBe('node:20-alpine');
     expect(jobs.build?.steps).toHaveLength(1);
-    expect(jobs.build?.steps[0]?.run).toBe('npm run build');
+    expect(jobs.build?.steps?.[0]?.run).toBe('npm run build');
     expect(jobs.build?.needs).toEqual([]);
     expect(jobs.build?.artifacts).toEqual({ paths: ['dist/**'] });
 
     // lint job
     expect(jobs.lint?.name).toBe('lint');
     expect(jobs.lint?.image).toBe('default-runner:latest');
-    expect(jobs.lint?.steps[0]?.run).toBe('npm run lint');
+    expect(jobs.lint?.steps?.[0]?.run).toBe('npm run lint');
     expect(jobs.lint?.needs).toEqual([]);
 
     // test job (needs string normalized to array)

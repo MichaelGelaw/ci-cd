@@ -42,6 +42,85 @@ export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
     }
   });
 
+  // In-memory sliding-window rate limiter
+  const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
+  const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX || '1000', 10);
+  const rateLimitWindowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10);
+
+  app.addHook('onRequest', async (req, reply) => {
+    if (req.method === 'OPTIONS') {
+      return;
+    }
+
+    const ip = req.ip || '127.0.0.1';
+    const now = Date.now();
+    let clientLimit = rateLimitStore.get(ip);
+
+    if (!clientLimit || now > clientLimit.resetAt) {
+      clientLimit = { count: 1, resetAt: now + rateLimitWindowMs };
+      rateLimitStore.set(ip, clientLimit);
+    } else {
+      clientLimit.count++;
+    }
+
+    const remaining = Math.max(0, rateLimitMax - clientLimit.count);
+    reply.header('X-RateLimit-Limit', rateLimitMax.toString());
+    reply.header('X-RateLimit-Remaining', remaining.toString());
+    reply.header('X-RateLimit-Reset', Math.ceil(clientLimit.resetAt / 1000).toString());
+
+    if (clientLimit.count > rateLimitMax) {
+      reply.status(429).send({
+        error: {
+          message: 'Rate limit exceeded. Try again later.',
+          code: 'RATE_LIMIT_EXCEEDED',
+        },
+      });
+      return;
+    }
+  });
+
+  // API Key Authentication (active only when MINI_CI_API_KEY is configured)
+  app.addHook('onRequest', async (req, reply) => {
+    if (req.method === 'OPTIONS') {
+      return;
+    }
+
+    const configuredApiKey = process.env.MINI_CI_API_KEY?.trim();
+    if (!configuredApiKey) {
+      return; // Permissive mode when no API key is configured
+    }
+
+    const urlPath = req.url.split('?')[0] || '';
+    const isExempt =
+      urlPath === '/health' ||
+      urlPath === '/health/ready' ||
+      urlPath === '/metrics' ||
+      urlPath.startsWith('/webhooks');
+
+    if (isExempt) {
+      return;
+    }
+
+    const authHeader = req.headers.authorization;
+    let providedKey: string | undefined;
+
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      providedKey = authHeader.slice(7).trim();
+    } else if (typeof req.headers['x-api-key'] === 'string') {
+      providedKey = req.headers['x-api-key'].trim();
+    }
+
+    if (!providedKey || providedKey !== configuredApiKey) {
+      reply.status(401).send({
+        error: {
+          message: 'Unauthorized: invalid or missing API key',
+          code: 'UNAUTHORIZED',
+        },
+      });
+      return;
+    }
+  });
+
   // Echo request id in response headers
   app.addHook('onSend', async (request, reply) => {
     if (request.id) {
@@ -55,7 +134,7 @@ export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
     if (startTime) {
       const diff = process.hrtime(startTime);
       const durationSeconds = diff[0] + diff[1] / 1e9;
-      const route = request.routeOptions?.url || request.url.split('?')[0];
+      const route = request.routeOptions?.url || request.url.split('?')[0] || request.url;
       recordHttpRequest(request.method, route, reply.statusCode, durationSeconds);
     }
   });

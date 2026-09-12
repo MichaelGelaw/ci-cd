@@ -141,10 +141,10 @@ export async function updateJobExecutionStatus(
   if (params.status === 'failed' || params.status === 'timed_out') {
     const isRetryable =
       existing.attempt < existing.max_attempts &&
-      isFailureRetryable(params.status, existing.retry_policy);
+      isFailureRetryable(params.status, existing.retry_policy ?? undefined);
 
     if (isRetryable) {
-      const delaySeconds = calculateRetryDelay(existing.attempt, existing.retry_policy);
+      const delaySeconds = calculateRetryDelay(existing.attempt, existing.retry_policy ?? undefined);
       const finishedAt = new Date();
 
       // Record this attempt before transitioning

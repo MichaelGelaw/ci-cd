@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --build",
+    "build": "tsc --noEmit && pnpm --filter @mini-ci/dashboard build",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:worker": "cd apps/worker && .venv/bin/pytest",

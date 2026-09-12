@@ -135,8 +135,9 @@ export async function updateGauges(): Promise<void> {
     const workers = await listWorkers().catch(() => []);
     const counts: Record<string, number> = { ready: 0, busy: 0, offline: 0, paused: 0 };
     for (const w of workers) {
-      if (counts[w.status] !== undefined) {
-        counts[w.status]++;
+      const current = counts[w.status];
+      if (current !== undefined) {
+        counts[w.status] = current + 1;
       }
     }
     for (const [status, count] of Object.entries(counts)) {

@@ -133,7 +133,7 @@ export async function submitWorkflow(
     }
   }
 
-  recordWorkflowStatus('running', options?.triggerEvent);
+  recordWorkflowStatus('running', options?.triggerEvent ?? undefined);
 
   return { run, jobs };
 }

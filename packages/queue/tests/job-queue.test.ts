@@ -118,6 +118,11 @@ describe('Redis Job Queue', () => {
         started_at: null,
         finished_at: null,
         duration_ms: null,
+        lease_token: null,
+        lease_expires_at: null,
+        lease_duration_seconds: null,
+        retry_policy: undefined,
+        next_retry_at: null,
         created_at: new Date().toISOString(),
       },
       {
@@ -139,6 +144,11 @@ describe('Redis Job Queue', () => {
         started_at: null,
         finished_at: null,
         duration_ms: null,
+        lease_token: null,
+        lease_expires_at: null,
+        lease_duration_seconds: null,
+        retry_policy: undefined,
+        next_retry_at: null,
         created_at: new Date().toISOString(),
       },
     ];

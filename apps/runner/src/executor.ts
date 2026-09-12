@@ -480,6 +480,7 @@ export async function executeWorkflow(
   }
 
   const mode = options.mode ?? (workflow.image ? 'docker' : 'shell');
+  const steps = workflow.steps ?? [];
   const workflowStart = new Date();
   const results: StepResult[] = [];
   let failed = false;
@@ -492,8 +493,8 @@ export async function executeWorkflow(
     const runRecord = await createWorkflowRun(workflow.name, 'running');
     dbRunId = runRecord.id;
 
-    for (let i = 0; i < workflow.steps.length; i++) {
-      const step = workflow.steps[i]!;
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i]!;
       const stepName = step.name ?? `Step ${i + 1}`;
       const image = step.image ?? (mode === 'docker' ? workflow.image : undefined);
 
@@ -519,8 +520,8 @@ export async function executeWorkflow(
   }
 
   try {
-    for (let i = 0; i < workflow.steps.length; i++) {
-      const step = workflow.steps[i]!;
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i]!;
       const stepName = step.name ?? `Step ${i + 1}`;
       const dbJobId = dbJobIds[i];
 
