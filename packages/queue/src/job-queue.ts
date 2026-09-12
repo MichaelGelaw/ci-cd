@@ -100,3 +100,73 @@ export async function reconcileQueue(queuedJobs: JobRecord[]): Promise<number> {
 
   return recoveredCount;
 }
+
+export function getWorkerQueueKey(workerId: string): string {
+  return `mini_ci:worker:${workerId}:jobs`;
+}
+
+export function getWorkerProcessingKey(workerId: string): string {
+  return `mini_ci:worker:${workerId}:processing`;
+}
+
+export async function enqueueJobForWorker(workerId: string, msg: JobQueueMessage): Promise<void> {
+  const redis = getRedisClient();
+  const queueKey = getWorkerQueueKey(workerId);
+  await redis.lpush(queueKey, JSON.stringify(msg));
+}
+
+export async function dequeueJobForWorker(
+  workerId: string,
+  timeoutSeconds: number = 0,
+): Promise<JobQueueMessage | null> {
+  const redis = getRedisClient();
+  const queueKey = getWorkerQueueKey(workerId);
+  const processingKey = getWorkerProcessingKey(workerId);
+  let raw: string | null = null;
+
+  if (timeoutSeconds > 0) {
+    raw = await redis.brpoplpush(queueKey, processingKey, timeoutSeconds);
+  } else {
+    raw = await redis.rpoplpush(queueKey, processingKey);
+  }
+
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw) as JobQueueMessage;
+  } catch {
+    return null;
+  }
+}
+
+export async function acknowledgeWorkerJob(workerId: string, jobId: string): Promise<boolean> {
+  const redis = getRedisClient();
+  const processingKey = getWorkerProcessingKey(workerId);
+  const items = await redis.lrange(processingKey, 0, -1);
+
+  for (const item of items) {
+    try {
+      const parsed = JSON.parse(item) as JobQueueMessage;
+      if (parsed.jobId === jobId) {
+        await redis.lrem(processingKey, 1, item);
+        return true;
+      }
+    } catch {
+      // Ignore unparseable
+    }
+  }
+
+  return false;
+}
+
+export async function getWorkerQueueLength(workerId: string): Promise<number> {
+  const redis = getRedisClient();
+  return redis.llen(getWorkerQueueKey(workerId));
+}
+
+export async function clearWorkerQueue(workerId: string): Promise<void> {
+  const redis = getRedisClient();
+  await redis.del(getWorkerQueueKey(workerId), getWorkerProcessingKey(workerId));
+}

@@ -9,6 +9,11 @@ import {
   clearQueue,
   reconcileQueue,
   closeRedis,
+  enqueueJobForWorker,
+  dequeueJobForWorker,
+  acknowledgeWorkerJob,
+  getWorkerQueueLength,
+  clearWorkerQueue,
 } from '../src/index.js';
 
 describe('Redis Job Queue', () => {
@@ -158,5 +163,30 @@ describe('Redis Job Queue', () => {
     // Reconcile should recognize that job-lost-1 is in processing, so it still doesn't re-enqueue
     const thirdPass = await reconcileQueue(sampleJobs);
     expect(thirdPass).toBe(0);
+  });
+
+  it('handles worker-specific job queues with reliable dequeue and acknowledge', async () => {
+    const workerId = 'worker-q-test-1';
+    await clearWorkerQueue(workerId);
+
+    const msg: JobQueueMessage = {
+      jobId: 'targeted-job-1',
+      workflowRunId: 'run-targeted',
+      queuedAt: new Date().toISOString(),
+      attempt: 1,
+    };
+
+    await enqueueJobForWorker(workerId, msg);
+    expect(await getWorkerQueueLength(workerId)).toBe(1);
+
+    const dequeued = await dequeueJobForWorker(workerId, 0);
+    expect(dequeued).not.toBeNull();
+    expect(dequeued?.jobId).toBe('targeted-job-1');
+    expect(await getWorkerQueueLength(workerId)).toBe(0);
+
+    const acknowledged = await acknowledgeWorkerJob(workerId, 'targeted-job-1');
+    expect(acknowledged).toBe(true);
+
+    await clearWorkerQueue(workerId);
   });
 });

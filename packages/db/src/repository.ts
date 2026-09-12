@@ -267,6 +267,58 @@ export async function getJobsByWorkflowRun(workflowRunId: string): Promise<JobRe
   return rows;
 }
 
+export async function listQueuedJobs(limit: number = 100): Promise<JobRecord[]> {
+  const pool = getPool();
+  const { rows } = await pool.query<JobRecord>(
+    `
+    SELECT
+      id,
+      workflow_run_id,
+      name,
+      command,
+      image,
+      status,
+      priority,
+      attempt,
+      max_attempts,
+      worker_id,
+      exit_code,
+      stdout,
+      stderr,
+      error,
+      timeout_seconds,
+      started_at::text,
+      finished_at::text,
+      duration_ms,
+      created_at::text
+    FROM jobs
+    WHERE status = 'queued'
+    ORDER BY priority DESC, created_at ASC
+    LIMIT $1;
+    `,
+    [limit],
+  );
+  return rows;
+}
+
+export async function countActiveJobsForWorkflowRun(workflowRunId: string): Promise<number> {
+  const pool = getPool();
+  const { rows } = await pool.query<{ count: string }>(
+    `
+    SELECT COUNT(*)::text AS count
+    FROM jobs
+    WHERE workflow_run_id = $1
+      AND status IN ('assigned', 'running');
+    `,
+    [workflowRunId],
+  );
+  return parseInt(rows[0]?.count ?? '0', 10);
+}
+
+export async function assignJobToWorker(jobId: string, workerId: string): Promise<JobRecord> {
+  return updateJobStatus(jobId, 'assigned', { workerId });
+}
+
 export async function updateJobStatus(
   jobId: string,
   nextStatus: JobStatus,

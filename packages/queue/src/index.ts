@@ -9,4 +9,11 @@ export {
   getProcessingLength,
   clearQueue,
   reconcileQueue,
+  getWorkerQueueKey,
+  getWorkerProcessingKey,
+  enqueueJobForWorker,
+  dequeueJobForWorker,
+  acknowledgeWorkerJob,
+  getWorkerQueueLength,
+  clearWorkerQueue,
 } from './job-queue.js';
