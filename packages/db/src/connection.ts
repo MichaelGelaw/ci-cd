@@ -11,11 +11,15 @@ export function getPool(): pg.Pool {
       process.env['DATABASE_URL'] ??
       'postgresql://postgres:postgres@localhost:5432/mini_ci';
 
+    const max = Number(process.env['DB_POOL_MAX'] ?? 25);
+    const idleTimeoutMillis = Number(process.env['DB_IDLE_TIMEOUT_MS'] ?? 30000);
+    const connectionTimeoutMillis = Number(process.env['DB_CONNECTION_TIMEOUT_MS'] ?? 5000);
+
     pool = new Pool({
       connectionString,
-      max: 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 5000,
+      max,
+      idleTimeoutMillis,
+      connectionTimeoutMillis,
     });
   }
   return pool;

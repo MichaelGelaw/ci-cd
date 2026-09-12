@@ -9,6 +9,7 @@
     "test:watch": "vitest",
     "test:worker": "cd apps/worker && .venv/bin/pytest",
     "test:all": "vitest run && cd apps/worker && .venv/bin/pytest",
+    "test:load": "tsx scripts/load-test.ts",
     "dev:runner": "tsx apps/runner/src/main.ts"
   },
   "devDependencies": {
