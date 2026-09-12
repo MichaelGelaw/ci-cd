@@ -152,7 +152,7 @@ class Worker:
                 final_status = "succeeded" if result.exit_code == 0 and not result.error else "failed"
                 # Transition: running -> succeeded / failed
                 try:
-                    self.api.update_job_status(
+                    resp = self.api.update_job_status(
                         job_id=job_id,
                         status=final_status,
                         worker_id=self.config.worker_id,
@@ -162,9 +162,16 @@ class Worker:
                         error=result.error,
                         duration_ms=result.duration_ms,
                     )
+                    reported_job = resp.get("job", {}) if isinstance(resp, dict) else {}
+                    reported_status = reported_job.get("status", final_status)
+                    if reported_status == "retrying":
+                        logger.info(
+                            f"Job {job_id} failed attempt {job.get('attempt')}; scheduled for retry by control plane"
+                        )
+                    else:
+                        logger.info(f"Job {job_id} finished with status {reported_status}")
                 except Exception as e:
                     logger.error(f"Failed to report final status for job {job_id}: {e}")
-                logger.info(f"Job {job_id} finished with status {final_status}")
         finally:
             if renewer:
                 renewer.stop()
