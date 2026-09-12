@@ -2,6 +2,11 @@ from typing import Any, Dict, List, Optional
 import requests
 
 
+class LeaseConflictError(Exception):
+    """Raised when a lease renewal fails due to ownership mismatch or expiration."""
+    pass
+
+
 class ApiClient:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
@@ -88,3 +93,26 @@ class ApiClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def renew_lease(
+        self,
+        job_id: str,
+        lease_token: str,
+        duration_seconds: int = 30,
+    ) -> Dict[str, Any]:
+        payload = {
+            "lease_token": lease_token,
+            "duration_seconds": duration_seconds,
+        }
+        resp = requests.post(
+            f"{self.base_url}/jobs/{job_id}/lease/renew",
+            json=payload,
+            timeout=10,
+        )
+        if resp.status_code == 409:
+            err_data = resp.json().get("error", {})
+            msg = err_data.get("message", "Lease renewal conflict")
+            raise LeaseConflictError(f"Lease conflict for job {job_id}: {msg}")
+        resp.raise_for_status()
+        return resp.json()
+

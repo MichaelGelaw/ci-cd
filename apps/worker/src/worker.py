@@ -7,6 +7,7 @@ from src.queue_consumer import QueueConsumer
 from src.api_client import ApiClient
 from src.executor import CommandExecutor
 from src.heartbeat import HeartbeatSender
+from src.lease_renewer import LeaseRenewer
 
 logger = logging.getLogger("worker")
 
@@ -108,45 +109,68 @@ class Worker:
 
         # Transition: assigned -> running
         try:
-            self.api.update_job_status(job_id, status="running", worker_id=self.config.worker_id)
+            running_resp = self.api.update_job_status(job_id, status="running", worker_id=self.config.worker_id)
+            if running_resp and isinstance(running_resp, dict) and running_resp.get("job"):
+                job = running_resp["job"]
         except Exception as e:
             logger.error(f"Could not transition job {job_id} to running: {e}")
             self.heartbeat(status="ready")
             self.consumer.acknowledge_job(job_id)
             return
 
-        # Execute
+        # Start lease renewer if job has lease
+        lease_token = job.get("lease_token")
+        lease_duration = job.get("lease_duration_seconds") or 30
+        renewer: Optional[LeaseRenewer] = None
+        if lease_token:
+            interval = max(0.5, float(lease_duration) / 3.0)
+            renewer = LeaseRenewer(
+                api_client=self.api,
+                job_id=job_id,
+                lease_token=lease_token,
+                duration_seconds=int(lease_duration),
+                interval_seconds=interval,
+            )
+            renewer.start()
+
         command = job.get("command", "")
         image = job.get("image")
         timeout_seconds = job.get("timeout_seconds")
 
-        result = CommandExecutor.execute(
-            command=command,
-            image=image,
-            timeout_seconds=timeout_seconds,
-        )
-
-        final_status = "succeeded" if result.exit_code == 0 and not result.error else "failed"
-
-        # Transition: running -> succeeded / failed
         try:
-            self.api.update_job_status(
-                job_id=job_id,
-                status=final_status,
-                worker_id=self.config.worker_id,
-                exit_code=result.exit_code,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                error=result.error,
-                duration_ms=result.duration_ms,
+            result = CommandExecutor.execute(
+                command=command,
+                image=image,
+                timeout_seconds=timeout_seconds,
             )
-        except Exception as e:
-            logger.error(f"Failed to report final status for job {job_id}: {e}")
 
-        # Return worker to ready state and acknowledge in Redis
-        self.heartbeat(status="ready")
-        self.consumer.acknowledge_job(job_id)
-        logger.info(f"Job {job_id} finished with status {final_status}")
+            if renewer and renewer.is_conflict():
+                logger.error(
+                    f"Worker fenced out: lease for job {job_id} was lost during execution; skipping status update"
+                )
+            else:
+                final_status = "succeeded" if result.exit_code == 0 and not result.error else "failed"
+                # Transition: running -> succeeded / failed
+                try:
+                    self.api.update_job_status(
+                        job_id=job_id,
+                        status=final_status,
+                        worker_id=self.config.worker_id,
+                        exit_code=result.exit_code,
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                        error=result.error,
+                        duration_ms=result.duration_ms,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to report final status for job {job_id}: {e}")
+                logger.info(f"Job {job_id} finished with status {final_status}")
+        finally:
+            if renewer:
+                renewer.stop()
+            # Return worker to ready state and acknowledge in Redis
+            self.heartbeat(status="ready")
+            self.consumer.acknowledge_job(job_id)
 
     def run_forever(self) -> None:
         self.register()
