@@ -7,6 +7,8 @@
     "build": "tsc --build",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:worker": "cd apps/worker && .venv/bin/pytest",
+    "test:all": "vitest run && cd apps/worker && .venv/bin/pytest",
     "dev:runner": "tsx apps/runner/src/main.ts"
   },
   "devDependencies": {
