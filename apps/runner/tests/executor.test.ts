@@ -183,4 +183,28 @@ describe('executeWorkflow', () => {
 
     await closePool();
   });
+
+  it('retries failed step and succeeds when attempts remain', async () => {
+    // A command that fails once and succeeds on retry
+    const tmpFile = `/tmp/mini_ci_retry_test_${Date.now()}`;
+    const workflow: WorkflowDefinition = {
+      name: 'retry-execution-test',
+      steps: [
+        {
+          name: 'flaky-step',
+          run: `if [ -f ${tmpFile} ]; then rm -f ${tmpFile}; exit 0; else touch ${tmpFile}; exit 1; fi`,
+          retry: {
+            max_attempts: 2,
+            base_delay_seconds: 0.05,
+            jitter: false,
+          },
+        },
+      ],
+    };
+
+    const result = await executeWorkflow(workflow);
+    expect(result.status).toBe('success');
+    expect(result.steps[0]!.status).toBe('success');
+  });
 });
+

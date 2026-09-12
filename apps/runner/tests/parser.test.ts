@@ -95,4 +95,62 @@ steps:
     const yaml = `- just a list`;
     expect(() => parseWorkflow(yaml)).toThrow('YAML mapping');
   });
+
+  it('parses retries and retry policy mapping', () => {
+    const yaml = `
+name: retry-test
+steps:
+  - run: ./flaky.sh
+    retries: 2
+  - run: ./flaky-policy.sh
+    retry:
+      max_attempts: 4
+      base_delay_seconds: 1.5
+      max_delay_seconds: 10
+      backoff_factor: 2
+      jitter: false
+      retry_on_timeout: true
+`;
+    const result = parseWorkflow(yaml);
+    expect(result.steps[0]!.retries).toBe(2);
+    expect(result.steps[1]!.retry).toEqual({
+      max_attempts: 4,
+      base_delay_seconds: 1.5,
+      max_delay_seconds: 10,
+      backoff_factor: 2,
+      jitter: false,
+      retry_on_timeout: true,
+    });
+  });
+
+  it('throws on invalid retry configurations', () => {
+    expect(() =>
+      parseWorkflow(`
+name: bad
+steps:
+  - run: echo 1
+    retries: -1
+`),
+    ).toThrow('non-negative integer');
+
+    expect(() =>
+      parseWorkflow(`
+name: bad
+steps:
+  - run: echo 1
+    retry: "not-a-map"
+`),
+    ).toThrow('must be a mapping');
+
+    expect(() =>
+      parseWorkflow(`
+name: bad
+steps:
+  - run: echo 1
+    retry:
+      max_attempts: 0
+`),
+    ).toThrow('max_attempts');
+  });
 });
+

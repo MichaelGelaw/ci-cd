@@ -15,6 +15,7 @@ import {
   updateWorkflowRun,
   createJob,
   updateJobStatus,
+  calculateRetryDelay,
 } from '@mini-ci/db';
 import { runStepInDocker } from './docker-runner.js';
 
@@ -123,6 +124,7 @@ export async function executeWorkflow(
       const stepName = step.name ?? `Step ${i + 1}`;
       const image = step.image ?? (mode === 'docker' ? workflow.image : undefined);
 
+      const retryPolicy = step.retry ?? (step.retries !== undefined ? { max_attempts: step.retries + 1 } : undefined);
       const jobRecord = await createJob({
         workflowRunId: dbRunId,
         name: stepName,
@@ -130,6 +132,7 @@ export async function executeWorkflow(
         image: image ?? null,
         timeoutSeconds: step.timeout_seconds ?? null,
         status: 'created',
+        retryPolicy,
       });
       dbJobIds.push(jobRecord.id);
     }
@@ -177,43 +180,75 @@ export async function executeWorkflow(
         continue;
       }
 
-      const stepStart = new Date();
-      const timeoutMs = step.timeout_seconds ? step.timeout_seconds * 1000 : undefined;
+      const retryPolicy = step.retry ?? (step.retries !== undefined ? { max_attempts: step.retries + 1 } : undefined);
+      const maxAttempts = retryPolicy?.max_attempts ?? 1;
 
-      if (dbJobId) {
-        await updateJobStatus(dbJobId, 'queued');
-        await updateJobStatus(dbJobId, 'assigned');
-        await updateJobStatus(dbJobId, 'running', { startedAt: stepStart });
-      }
+      let result!: StepOutput;
+      let stepStart!: Date;
+      let stepEnd!: Date;
+      let status!: StepStatus;
 
-      let result: StepOutput;
-
-      if (mode === 'docker') {
-        // Step-level image overrides workflow-level image.
-        const image = step.image ?? workflow.image;
-        if (!image) {
-          result = {
-            exit_code: null,
-            stdout: '',
-            stderr: '',
-            error: 'No Docker image specified for step or workflow',
-          };
-        } else {
-          result = await runStepInDocker(image, step.run, workspaceDir!, timeoutMs);
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (attempt > 1) {
+          const delaySeconds = calculateRetryDelay(attempt - 1, retryPolicy);
+          if (delaySeconds > 0) {
+            await new Promise((r) => setTimeout(r, Math.min(delaySeconds * 1000, 5000)));
+          }
         }
-      } else {
-        result = await runStepShell(step.run, timeoutMs, options.shell ?? true);
-      }
 
-      const stepEnd = new Date();
+        stepStart = new Date();
+        const timeoutMs = step.timeout_seconds ? step.timeout_seconds * 1000 : undefined;
 
-      let status: StepStatus;
-      if (result.error) {
-        status = 'failed';
-      } else if (result.exit_code === 0) {
-        status = 'success';
-      } else {
-        status = 'failed';
+        if (dbJobId) {
+          if (attempt === 1) {
+            await updateJobStatus(dbJobId, 'queued');
+            await updateJobStatus(dbJobId, 'assigned');
+          }
+          await updateJobStatus(dbJobId, 'running', { startedAt: stepStart });
+        }
+
+        if (mode === 'docker') {
+          // Step-level image overrides workflow-level image.
+          const image = step.image ?? workflow.image;
+          if (!image) {
+            result = {
+              exit_code: null,
+              stdout: '',
+              stderr: '',
+              error: 'No Docker image specified for step or workflow',
+            };
+          } else {
+            result = await runStepInDocker(image, step.run, workspaceDir!, timeoutMs);
+          }
+        } else {
+          result = await runStepShell(step.run, timeoutMs, options.shell ?? true);
+        }
+
+        stepEnd = new Date();
+
+        if (result.error) {
+          status = 'failed';
+        } else if (result.exit_code === 0) {
+          status = 'success';
+        } else {
+          status = 'failed';
+        }
+
+        if (status === 'success') {
+          break;
+        }
+
+        if (attempt < maxAttempts && dbJobId) {
+          await updateJobStatus(dbJobId, 'failed', {
+            exitCode: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            error: result.error ?? null,
+          });
+          await updateJobStatus(dbJobId, 'retrying');
+          await updateJobStatus(dbJobId, 'queued');
+          await updateJobStatus(dbJobId, 'assigned');
+        }
       }
 
       const stepResult: StepResult = {

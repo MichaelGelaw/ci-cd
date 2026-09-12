@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 
-import type { WorkflowDefinition, StepDefinition } from '@mini-ci/types';
+import type { WorkflowDefinition, StepDefinition, RetryPolicy } from '@mini-ci/types';
 
 export function parseWorkflowFile(filePath: string): WorkflowDefinition {
   const raw = readFileSync(filePath, 'utf-8');
@@ -67,6 +67,60 @@ export function parseWorkflow(content: string): WorkflowDefinition {
         throw new Error(`Step ${i + 1} "timeout_seconds" must be a positive number`);
       }
       def.timeout_seconds = s['timeout_seconds'];
+    }
+
+    if (s['retries'] !== undefined) {
+      if (typeof s['retries'] !== 'number' || !Number.isInteger(s['retries']) || s['retries'] < 0) {
+        throw new Error(`Step ${i + 1} "retries" must be a non-negative integer`);
+      }
+      def.retries = s['retries'];
+    }
+
+    if (s['retry'] !== undefined) {
+      if (typeof s['retry'] !== 'object' || s['retry'] === null || Array.isArray(s['retry'])) {
+        throw new Error(`Step ${i + 1} "retry" must be a mapping`);
+      }
+      const r = s['retry'] as Record<string, unknown>;
+      const policy: RetryPolicy = {};
+
+      if (r['max_attempts'] !== undefined) {
+        if (typeof r['max_attempts'] !== 'number' || !Number.isInteger(r['max_attempts']) || r['max_attempts'] < 1) {
+          throw new Error(`Step ${i + 1} retry "max_attempts" must be an integer >= 1`);
+        }
+        policy.max_attempts = r['max_attempts'];
+      }
+      if (r['base_delay_seconds'] !== undefined) {
+        if (typeof r['base_delay_seconds'] !== 'number' || r['base_delay_seconds'] <= 0) {
+          throw new Error(`Step ${i + 1} retry "base_delay_seconds" must be a positive number`);
+        }
+        policy.base_delay_seconds = r['base_delay_seconds'];
+      }
+      if (r['max_delay_seconds'] !== undefined) {
+        if (typeof r['max_delay_seconds'] !== 'number' || r['max_delay_seconds'] <= 0) {
+          throw new Error(`Step ${i + 1} retry "max_delay_seconds" must be a positive number`);
+        }
+        policy.max_delay_seconds = r['max_delay_seconds'];
+      }
+      if (r['backoff_factor'] !== undefined) {
+        if (typeof r['backoff_factor'] !== 'number' || r['backoff_factor'] < 1) {
+          throw new Error(`Step ${i + 1} retry "backoff_factor" must be a number >= 1`);
+        }
+        policy.backoff_factor = r['backoff_factor'];
+      }
+      if (r['jitter'] !== undefined) {
+        if (typeof r['jitter'] !== 'boolean') {
+          throw new Error(`Step ${i + 1} retry "jitter" must be a boolean`);
+        }
+        policy.jitter = r['jitter'];
+      }
+      if (r['retry_on_timeout'] !== undefined) {
+        if (typeof r['retry_on_timeout'] !== 'boolean') {
+          throw new Error(`Step ${i + 1} retry "retry_on_timeout" must be a boolean`);
+        }
+        policy.retry_on_timeout = r['retry_on_timeout'];
+      }
+
+      def.retry = policy;
     }
 
     return def;
