@@ -1,6 +1,9 @@
 export type {
   StepDefinition,
+  JobDefinition,
   WorkflowDefinition,
+  NormalizedJobDefinition,
+  NormalizedWorkflowDefinition,
   StepStatus,
   WorkflowStatus,
   StepResult,

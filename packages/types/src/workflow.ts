@@ -24,10 +24,50 @@ export interface StepDefinition {
   artifacts?: string[] | ArtifactConfig;
 }
 
+export interface JobDefinition {
+  name?: string;
+  image?: string;
+  steps?: StepDefinition[];
+  run?: string;
+  needs?: string[] | string;
+  timeout_seconds?: number;
+  retries?: number;
+  retry?: RetryPolicy;
+  artifacts?: string[] | ArtifactConfig;
+  priority?: number;
+  tags?: string[];
+  env?: Record<string, string>;
+}
+
 export interface WorkflowDefinition {
   name: string;
   image?: string;
+  steps?: StepDefinition[];
+  jobs?: Record<string, JobDefinition>;
+  env?: Record<string, string>;
+}
+
+export interface NormalizedJobDefinition {
+  id: string;
+  name: string;
+  image?: string;
   steps: StepDefinition[];
+  needs: string[];
+  timeout_seconds?: number;
+  retries?: number;
+  retry?: RetryPolicy;
+  artifacts?: string[] | ArtifactConfig;
+  priority?: number;
+  tags?: string[];
+  env?: Record<string, string>;
+}
+
+export interface NormalizedWorkflowDefinition {
+  name: string;
+  image?: string;
+  jobs: Record<string, NormalizedJobDefinition>;
+  topologicalOrder: string[];
+  env?: Record<string, string>;
 }
 
 // Execution results -- produced by the runner after executing a workflow.
@@ -92,6 +132,8 @@ export interface WorkflowRunRecord {
 export interface JobRecord {
   id: string;
   workflow_run_id: string;
+  job_key?: string | null;
+  needs?: string[];
   name: string;
   command: string;
   image: string | null;
