@@ -10,9 +10,12 @@ describe('Job State Machine', () => {
     expect(isValidTransition('running', 'succeeded')).toBe(true);
   });
 
-  it('allows failure and cancellation paths from running', () => {
-    expect(isValidTransition('running', 'failed')).toBe(true);
+  it('allows failure and cancellation paths', () => {
+    expect(isValidTransition('created', 'cancelled')).toBe(true);
+    expect(isValidTransition('queued', 'cancelled')).toBe(true);
+    expect(isValidTransition('assigned', 'cancelled')).toBe(true);
     expect(isValidTransition('running', 'cancelled')).toBe(true);
+    expect(isValidTransition('running', 'failed')).toBe(true);
     expect(isValidTransition('running', 'timed_out')).toBe(true);
   });
 

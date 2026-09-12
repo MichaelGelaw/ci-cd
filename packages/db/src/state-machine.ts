@@ -2,9 +2,9 @@ import type { JobStatus } from '@mini-ci/types';
 
 // Legal state transitions defined in docs/job-lifecycle.md
 const LEGAL_TRANSITIONS: Record<JobStatus, readonly JobStatus[]> = {
-  created: ['queued'],
-  queued: ['assigned'],
-  assigned: ['running'],
+  created: ['queued', 'cancelled'],
+  queued: ['assigned', 'cancelled'],
+  assigned: ['running', 'cancelled'],
   running: ['succeeded', 'failed', 'cancelled', 'timed_out'],
   failed: ['retrying'],
   timed_out: ['retrying'],
