@@ -8,6 +8,7 @@ import {
   reapDeadWorkersService,
   findStaleWorkersService,
 } from '../services/worker-service.js';
+import { recoverStaleJobsService } from '../services/job-service.js';
 
 const VALID_WORKER_STATUSES: Set<WorkerStatus> = new Set(['ready', 'busy', 'offline', 'paused']);
 
@@ -130,6 +131,12 @@ export const workerRoutes: FastifyPluginAsync = async (app) => {
     const timeout = Math.max(1, parseInt(String(rawTimeout), 10) || 30);
 
     const reapedWorkers = await reapDeadWorkersService(timeout);
-    return reply.status(200).send({ reapedWorkers, count: reapedWorkers.length });
+    const recoveredJobs = await recoverStaleJobsService({ heartbeatTimeoutSeconds: timeout });
+    return reply.status(200).send({
+      reapedWorkers,
+      count: reapedWorkers.length,
+      recoveredJobs,
+      recoveredCount: recoveredJobs.length,
+    });
   });
 };

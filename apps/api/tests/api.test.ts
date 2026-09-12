@@ -771,6 +771,166 @@ steps:
       expect(finalAttempts.json().attempts).toHaveLength(2);
     });
   });
+
+  describe('Recovery API', () => {
+    it('discovers recoverable jobs and recovers individual orphaned jobs', async () => {
+      // 1. Submit workflow with a 2-attempt job
+      const submitRes = await app.inject({
+        method: 'POST',
+        url: '/workflows/runs',
+        headers: { 'content-type': 'application/json' },
+        payload: {
+          yaml: `
+name: recovery-test
+steps:
+  - name: step-rec
+    run: echo "test recovery"
+    retry:
+      max_attempts: 2
+`,
+        },
+      });
+
+      expect(submitRes.statusCode).toBe(201);
+      const submitBody = submitRes.json();
+      const jobId = submitBody.jobs[0].id;
+
+      // Register worker
+      const workerRes = await app.inject({
+        method: 'POST',
+        url: '/workers/register',
+        payload: { name: 'worker-rec-node', id: `worker-rec-${Date.now()}` },
+      });
+      const workerId = workerRes.json().worker.id;
+
+      // Transition job: queued -> assigned -> running
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/status`,
+        payload: { status: 'assigned', worker_id: workerId },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/status`,
+        payload: { status: 'running', worker_id: workerId },
+      });
+
+      // Backdate lease in DB to simulate worker crash / expired lease
+      const pool = getPool();
+      await pool.query(
+        "UPDATE jobs SET lease_expires_at = NOW() - INTERVAL '30 seconds' WHERE id = $1;",
+        [jobId],
+      );
+
+      // GET /jobs/recoverable should find this job
+      const listRes = await app.inject({
+        method: 'GET',
+        url: '/jobs/recoverable',
+      });
+      expect(listRes.statusCode).toBe(200);
+      const listBody = listRes.json();
+      expect(listBody.recoverableJobs.some((j: any) => j.id === jobId)).toBe(true);
+
+      // POST /jobs/:id/recover should recover the job
+      const recRes = await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/recover`,
+        payload: { reason: 'Worker crashed unexpectedly' },
+      });
+      expect(recRes.statusCode).toBe(200);
+      const recBody = recRes.json();
+      expect(recBody.action).toBe('retrying');
+      expect(recBody.job.status).toBe('retrying');
+      expect(recBody.job.lease_token).toBeNull();
+
+      // Verify attempt 1 was marked as failed
+      const attemptsRes = await app.inject({
+        method: 'GET',
+        url: `/jobs/${jobId}/attempts`,
+      });
+      expect(attemptsRes.json().attempts).toHaveLength(1);
+      expect(attemptsRes.json().attempts[0].status).toBe('failed');
+      expect(attemptsRes.json().attempts[0].error).toContain('Worker crashed');
+    });
+
+    it('cascades job recovery when dead workers are reaped via POST /workers/reap', async () => {
+      // 1. Submit workflow
+      const submitRes = await app.inject({
+        method: 'POST',
+        url: '/workflows/runs',
+        headers: { 'content-type': 'application/json' },
+        payload: {
+          yaml: `
+name: reap-recovery-test
+steps:
+  - name: step-reaped
+    run: echo "test reap recovery"
+    retry:
+      max_attempts: 2
+`,
+        },
+      });
+
+      const jobId = submitRes.json().jobs[0].id;
+
+      // 2. Register worker
+      const workerRes = await app.inject({
+        method: 'POST',
+        url: '/workers/register',
+        payload: { name: 'worker-doomed', id: `worker-doomed-${Date.now()}` },
+      });
+      const workerId = workerRes.json().worker.id;
+
+      // 3. Assign and set running
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/status`,
+        payload: { status: 'assigned', worker_id: workerId },
+      });
+      await app.inject({
+        method: 'POST',
+        url: `/jobs/${jobId}/status`,
+        payload: { status: 'running', worker_id: workerId },
+      });
+
+      // 4. Backdate worker heartbeat to 60s ago
+      const pool = getPool();
+      await pool.query(
+        "UPDATE workers SET last_heartbeat_at = NOW() - INTERVAL '60 seconds' WHERE id = $1;",
+        [workerId],
+      );
+
+      // 5. POST /workers/reap should reap worker and recover the abandoned job
+      const reapRes = await app.inject({
+        method: 'POST',
+        url: '/workers/reap',
+        payload: { timeout_seconds: 30 },
+      });
+      expect(reapRes.statusCode).toBe(200);
+      const reapBody = reapRes.json();
+      expect(reapBody.reapedWorkers.some((w: any) => w.id === workerId)).toBe(true);
+      expect(reapBody.recoveredJobs.some((r: any) => r.job.id === jobId)).toBe(true);
+
+      // Verify job is no longer running
+      const jobCheck = await app.inject({
+        method: 'GET',
+        url: `/jobs/${jobId}`,
+      });
+      expect(jobCheck.json().job.status).toBe('retrying');
+    });
+
+    it('POST /scheduler/tick recovers stale jobs before retrying and scheduling', async () => {
+      const tickRes = await app.inject({
+        method: 'POST',
+        url: '/scheduler/tick',
+      });
+      expect(tickRes.statusCode).toBe(200);
+      const tickBody = tickRes.json();
+      expect(tickBody).toHaveProperty('recovered');
+      expect(tickBody).toHaveProperty('retried');
+      expect(tickBody).toHaveProperty('scheduled');
+    });
+  });
 });
 
 

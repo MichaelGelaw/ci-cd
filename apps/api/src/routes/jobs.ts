@@ -9,10 +9,93 @@ import {
   findExpiredLeasesService,
   dispatchDueRetries,
   findDueRetryingJobsService,
+  findRecoverableJobsService,
+  recoverJobService,
+  recoverStaleJobsService,
   LeaseConflictError,
 } from '../services/job-service.js';
 
 export const jobRoutes: FastifyPluginAsync = async (app) => {
+  app.get('/jobs/recoverable', async (request, reply) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const leaseGracePeriod = query['lease_grace_period_seconds']
+      ? parseInt(String(query['lease_grace_period_seconds']), 10)
+      : undefined;
+    const heartbeatTimeout = query['heartbeat_timeout_seconds']
+      ? parseInt(String(query['heartbeat_timeout_seconds']), 10)
+      : undefined;
+
+    try {
+      const recoverableJobs = await findRecoverableJobsService({
+        leaseGracePeriodSeconds: leaseGracePeriod,
+        heartbeatTimeoutSeconds: heartbeatTimeout,
+      });
+      return reply.status(200).send({ recoverableJobs, count: recoverableJobs.length });
+    } catch (err) {
+      const message = (err as Error).message;
+      return reply.status(500).send({
+        error: {
+          message,
+          code: 'INTERNAL_ERROR',
+        },
+      });
+    }
+  });
+
+  app.post('/jobs/recover', async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const leaseGracePeriod = body['lease_grace_period_seconds'] ?? query['lease_grace_period_seconds']
+      ? parseInt(String(body['lease_grace_period_seconds'] ?? query['lease_grace_period_seconds']), 10)
+      : undefined;
+    const heartbeatTimeout = body['heartbeat_timeout_seconds'] ?? query['heartbeat_timeout_seconds']
+      ? parseInt(String(body['heartbeat_timeout_seconds'] ?? query['heartbeat_timeout_seconds']), 10)
+      : undefined;
+
+    try {
+      const recoveredJobs = await recoverStaleJobsService({
+        leaseGracePeriodSeconds: leaseGracePeriod,
+        heartbeatTimeoutSeconds: heartbeatTimeout,
+      });
+      return reply.status(200).send({ recoveredJobs, count: recoveredJobs.length });
+    } catch (err) {
+      const message = (err as Error).message;
+      return reply.status(500).send({
+        error: {
+          message,
+          code: 'INTERNAL_ERROR',
+        },
+      });
+    }
+  });
+
+  app.post('/jobs/:id/recover', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const reason = typeof body['reason'] === 'string' ? body['reason'] : undefined;
+    const immediate = Boolean(body['immediate'] ?? body['immediate_requeue']);
+
+    try {
+      const result = await recoverJobService(id, reason, { immediateRequeue: immediate });
+      return reply.status(200).send(result);
+    } catch (err) {
+      const message = (err as Error).message;
+      if (message.includes('not found')) {
+        return reply.status(404).send({
+          error: {
+            message,
+            code: 'NOT_FOUND',
+          },
+        });
+      }
+      return reply.status(500).send({
+        error: {
+          message,
+          code: 'INTERNAL_ERROR',
+        },
+      });
+    }
+  });
   app.get('/jobs/leases/expired', async (request, reply) => {
     const query = (request.query ?? {}) as { grace_period_seconds?: string };
     const gracePeriodSeconds = query.grace_period_seconds

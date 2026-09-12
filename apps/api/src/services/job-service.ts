@@ -18,7 +18,15 @@ import {
   requeueJobForRetry,
   calculateRetryDelay,
   isFailureRetryable,
+  findRecoverableJobs,
+  recoverJob,
+  recoverStaleJobs,
   LeaseConflictError,
+} from '@mini-ci/db';
+import type {
+  FindRecoverableJobsOptions,
+  RecoverJobOptions,
+  RecoverJobResult,
 } from '@mini-ci/db';
 import { enqueueJob } from '@mini-ci/queue';
 
@@ -211,5 +219,54 @@ export async function findDueRetryingJobsService(limit: number = 100): Promise<J
   return findDueRetryingJobs(limit);
 }
 
+export async function findRecoverableJobsService(
+  options: FindRecoverableJobsOptions = {},
+): Promise<JobRecord[]> {
+  return findRecoverableJobs(options);
+}
+
+export async function recoverJobService(
+  jobId: string,
+  reason?: string,
+  options: RecoverJobOptions = {},
+): Promise<RecoverJobResult> {
+  const result = await recoverJob(jobId, reason, options);
+  if (result.action === 'requeued') {
+    try {
+      await enqueueJob({
+        jobId: result.job.id,
+        workflowRunId: result.job.workflow_run_id,
+        queuedAt: new Date().toISOString(),
+        attempt: result.job.attempt,
+      });
+    } catch {
+      // Best-effort queueing
+    }
+  }
+  return result;
+}
+
+export async function recoverStaleJobsService(
+  options: FindRecoverableJobsOptions = {},
+): Promise<RecoverJobResult[]> {
+  const results = await recoverStaleJobs(options);
+  for (const r of results) {
+    if (r.action === 'requeued') {
+      try {
+        await enqueueJob({
+          jobId: r.job.id,
+          workflowRunId: r.job.workflow_run_id,
+          queuedAt: new Date().toISOString(),
+          attempt: r.job.attempt,
+        });
+      } catch {
+        // Best-effort queueing
+      }
+    }
+  }
+  return results;
+}
+
 export { LeaseConflictError };
+
 
