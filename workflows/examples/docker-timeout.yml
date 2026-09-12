@@ -1,0 +1,8 @@
+name: docker-timeout
+image: alpine:latest
+
+steps:
+  - name: slow step
+    run: sleep 60
+    timeout_seconds: 3
+  - run: echo "this should be skipped"

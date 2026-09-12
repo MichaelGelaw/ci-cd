@@ -2,5 +2,5 @@ name: hello
 
 steps:
   - run: echo "hello world"
-  - run: python --version
+  - run: python3 --version
   - run: echo "done"

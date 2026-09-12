@@ -1,0 +1,6 @@
+name: docker-hello
+image: alpine:latest
+
+steps:
+  - run: echo "hello from alpine"
+  - run: cat /etc/os-release | head -1

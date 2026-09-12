@@ -1,0 +1,7 @@
+name: docker-node
+image: node:20-alpine
+
+steps:
+  - run: node --version
+  - run: echo 'console.log("hello from node")' > /workspace/test.js
+  - run: node /workspace/test.js
