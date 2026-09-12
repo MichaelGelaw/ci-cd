@@ -13,7 +13,13 @@ logger = logging.getLogger("worker")
 class Worker:
     def __init__(self, config: Optional[WorkerConfig] = None):
         self.config = config or WorkerConfig()
-        self.consumer = QueueConsumer(self.config.redis_url)
+        queue_key = self.config.queue_key or f"mini_ci:worker:{self.config.worker_id}:jobs"
+        processing_key = f"mini_ci:worker:{self.config.worker_id}:processing"
+        self.consumer = QueueConsumer(
+            self.config.redis_url,
+            queue_key=queue_key,
+            processing_key=processing_key,
+        )
         self.api = ApiClient(self.config.api_url)
         self.running = False
         self.is_registered = False

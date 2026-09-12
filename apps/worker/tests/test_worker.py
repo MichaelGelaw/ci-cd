@@ -34,8 +34,6 @@ def test_queue_consumer_pop_and_acknowledge():
 
 def test_worker_run_once_executes_and_reports():
     r = redis.Redis.from_url("redis://localhost:6379", decode_responses=True)
-    r.delete(QueueConsumer.QUEUE_KEY, QueueConsumer.PROCESSING_KEY)
-
     config = WorkerConfig(
         redis_url="redis://localhost:6379",
         api_url="http://localhost:3000",
@@ -43,6 +41,7 @@ def test_worker_run_once_executes_and_reports():
     )
 
     worker = Worker(config)
+    r.delete(worker.consumer.queue_key, worker.consumer.processing_key)
 
     # Mock API client to avoid needing API server running for this unit test
     worker.api = MagicMock()
@@ -54,9 +53,9 @@ def test_worker_run_once_executes_and_reports():
     }
     worker.api.update_job_status.return_value = {"status": "ok"}
 
-    # Enqueue a job
+    # Enqueue a job to worker's queue
     msg = {"jobId": "job-unit-test", "workflowRunId": "run-unit-test"}
-    r.lpush(QueueConsumer.QUEUE_KEY, json.dumps(msg))
+    r.lpush(worker.consumer.queue_key, json.dumps(msg))
 
     # Process one job
     processed = worker.run_once(timeout_seconds=1)
@@ -83,8 +82,8 @@ def test_worker_run_once_executes_and_reports():
     assert "worker unit test" in final_call.kwargs.get("stdout", "")
 
     # Verify Redis queue is acknowledged and empty
-    assert r.llen(QueueConsumer.QUEUE_KEY) == 0
-    assert r.llen(QueueConsumer.PROCESSING_KEY) == 0
+    assert r.llen(worker.consumer.queue_key) == 0
+    assert r.llen(worker.consumer.processing_key) == 0
 
 
 def test_worker_register_calls_api():
@@ -136,3 +135,34 @@ def test_worker_heartbeat_calls_api():
     success = worker.heartbeat(status="busy")
     assert success is True
     worker.api.heartbeat.assert_called_once_with("worker-hb-test", status="busy")
+
+
+def test_worker_consumes_from_custom_queue():
+    r = redis.Redis.from_url("redis://localhost:6379", decode_responses=True)
+    custom_q = "mini_ci:test_custom:jobs"
+    custom_proc = "mini_ci:test_custom:processing"
+    r.delete(custom_q, custom_proc)
+
+    config = WorkerConfig(
+        worker_id="custom-q-worker",
+        queue_key=custom_q,
+    )
+    worker = Worker(config)
+    worker.api = MagicMock()
+    worker.api.get_job.return_value = {
+        "id": "job-custom-q",
+        "name": "custom-step",
+        "command": "echo 'custom queue works'",
+        "status": "queued",
+    }
+    worker.api.update_job_status.return_value = {"status": "ok"}
+
+    msg = {"jobId": "job-custom-q", "workflowRunId": "run-custom-q"}
+    r.lpush(custom_q, json.dumps(msg))
+
+    assert r.llen(custom_q) == 1
+    processed = worker.run_once(timeout_seconds=1)
+    assert processed is True
+    assert r.llen(custom_q) == 0
+    assert r.llen(custom_proc) == 0
+    r.delete(custom_q, custom_proc)

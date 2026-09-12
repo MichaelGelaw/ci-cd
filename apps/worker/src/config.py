@@ -22,3 +22,4 @@ class WorkerConfig:
     worker_address: Optional[str] = os.getenv("WORKER_ADDRESS", None)
     worker_tags: List[str] = field(default_factory=_default_tags)
     poll_timeout_seconds: int = int(os.getenv("POLL_TIMEOUT_SECONDS", "2"))
+    queue_key: Optional[str] = os.getenv("WORKER_QUEUE", None)
