@@ -152,5 +152,127 @@ steps:
 `),
     ).toThrow('max_attempts');
   });
+
+  it('parses a valid multi-job workflow with dependencies and shorthands', () => {
+    const yaml = `
+name: pipeline
+image: default-runner:latest
+jobs:
+  build:
+    name: Build Application
+    image: node:20-alpine
+    run: npm run build
+    artifacts:
+      paths:
+        - dist/**
+  lint:
+    run: npm run lint
+  test:
+    needs: build
+    steps:
+      - run: npm test
+  deploy:
+    needs: [test, lint]
+    run: ./deploy.sh
+`;
+    const result = parseWorkflow(yaml);
+
+    expect(result.name).toBe('pipeline');
+    expect(result.image).toBe('default-runner:latest');
+    expect(result.jobs).toBeDefined();
+
+    const jobs = result.jobs!;
+    expect(Object.keys(jobs)).toEqual(['build', 'lint', 'test', 'deploy']);
+
+    // build job
+    expect(jobs.build?.name).toBe('Build Application');
+    expect(jobs.build?.image).toBe('node:20-alpine');
+    expect(jobs.build?.steps).toHaveLength(1);
+    expect(jobs.build?.steps[0]?.run).toBe('npm run build');
+    expect(jobs.build?.needs).toEqual([]);
+    expect(jobs.build?.artifacts).toEqual({ paths: ['dist/**'] });
+
+    // lint job
+    expect(jobs.lint?.name).toBe('lint');
+    expect(jobs.lint?.image).toBe('default-runner:latest');
+    expect(jobs.lint?.steps[0]?.run).toBe('npm run lint');
+    expect(jobs.lint?.needs).toEqual([]);
+
+    // test job (needs string normalized to array)
+    expect(jobs.test?.needs).toEqual(['build']);
+
+    // deploy job (needs array)
+    expect(jobs.deploy?.needs).toEqual(['test', 'lint']);
+  });
+
+  it('detects unknown job dependency', () => {
+    const yaml = `
+name: bad-dep
+jobs:
+  test:
+    needs: [nonexistent]
+    run: npm test
+`;
+    expect(() => parseWorkflow(yaml)).toThrow('depends on unknown job "nonexistent"');
+  });
+
+  it('detects self-dependency', () => {
+    const yaml = `
+name: self-dep
+jobs:
+  build:
+    needs: [build]
+    run: npm run build
+`;
+    expect(() => parseWorkflow(yaml)).toThrow('cannot depend on itself');
+  });
+
+  it('detects direct circular dependency (A -> B -> A)', () => {
+    const yaml = `
+name: cycle
+jobs:
+  a:
+    needs: [b]
+    run: echo a
+  b:
+    needs: [a]
+    run: echo b
+`;
+    expect(() => parseWorkflow(yaml)).toThrow('Circular dependency detected');
+  });
+
+  it('detects indirect circular dependency (A -> B -> C -> A)', () => {
+    const yaml = `
+name: deep-cycle
+jobs:
+  a:
+    needs: [c]
+    run: echo a
+  b:
+    needs: [a]
+    run: echo b
+  c:
+    needs: [b]
+    run: echo c
+`;
+    expect(() => parseWorkflow(yaml)).toThrow('Circular dependency detected');
+  });
+
+  it('throws when neither steps nor jobs are provided', () => {
+    const yaml = `
+name: empty-pipeline
+`;
+    expect(() => parseWorkflow(yaml)).toThrow('either a "jobs" mapping or a "steps" array');
+  });
+
+  it('throws when job defines neither steps nor run', () => {
+    const yaml = `
+name: no-steps
+jobs:
+  build:
+    name: Build
+`;
+    expect(() => parseWorkflow(yaml)).toThrow('must define either a "steps" array or a "run" command');
+  });
 });
 

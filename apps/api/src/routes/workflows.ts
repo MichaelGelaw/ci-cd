@@ -14,7 +14,7 @@ export const workflowRoutes: FastifyPluginAsync = async (app) => {
         input = body['yaml'];
       } else if (body['workflow'] && typeof body['workflow'] === 'object') {
         input = body['workflow'] as WorkflowDefinition;
-      } else if ('name' in body && 'steps' in body) {
+      } else if ('name' in body && ('steps' in body || 'jobs' in body)) {
         input = body as unknown as WorkflowDefinition;
       } else {
         return reply.status(400).send({

@@ -1275,6 +1275,100 @@ steps:
       expect(checkDeletedRes.statusCode).toBe(404);
     });
   });
+
+  describe('Multi-Job Workflow API', () => {
+    it('submits a multi-job workflow and sets proper initial states and dependencies', async () => {
+      const multiJobYaml = `
+name: multi-job-ci
+image: node:20-alpine
+jobs:
+  build:
+    name: Build Application
+    run: npm run build
+  lint:
+    run: npm run lint
+  test:
+    needs: [build]
+    run: npm test
+  deploy:
+    needs: [test, lint]
+    run: ./deploy.sh
+`;
+
+      const submitRes = await app.inject({
+        method: 'POST',
+        url: '/workflows/runs',
+        headers: { 'content-type': 'application/x-yaml' },
+        payload: multiJobYaml,
+      });
+
+      expect(submitRes.statusCode).toBe(201);
+      const submitBody = submitRes.json();
+      expect(submitBody.run).toBeDefined();
+      expect(submitBody.jobs).toHaveLength(4);
+
+      const runId = submitBody.run.id;
+      const jobs = submitBody.jobs;
+
+      // Find individual jobs by job_key
+      const buildJob = jobs.find((j: any) => j.job_key === 'build');
+      const lintJob = jobs.find((j: any) => j.job_key === 'lint');
+      const testJob = jobs.find((j: any) => j.job_key === 'test');
+      const deployJob = jobs.find((j: any) => j.job_key === 'deploy');
+
+      expect(buildJob).toBeDefined();
+      expect(lintJob).toBeDefined();
+      expect(testJob).toBeDefined();
+      expect(deployJob).toBeDefined();
+
+      // Root jobs (build and lint) should be queued immediately
+      expect(buildJob.status).toBe('queued');
+      expect(buildJob.needs).toEqual([]);
+      expect(lintJob.status).toBe('queued');
+      expect(lintJob.needs).toEqual([]);
+
+      // Dependent jobs (test and deploy) should be in 'created' state
+      expect(testJob.status).toBe('created');
+      expect(testJob.needs).toEqual(['build']);
+      expect(deployJob.status).toBe('created');
+      expect(deployJob.needs).toEqual(['test', 'lint']);
+
+      // GET /workflow-runs/:id should include the jobs with job_key and needs
+      const getRunRes = await app.inject({
+        method: 'GET',
+        url: `/workflow-runs/${runId}`,
+      });
+      expect(getRunRes.statusCode).toBe(200);
+      const runDetails = getRunRes.json();
+      expect(runDetails.jobs).toHaveLength(4);
+      const fetchedTestJob = runDetails.jobs.find((j: any) => j.job_key === 'test');
+      expect(fetchedTestJob.needs).toEqual(['build']);
+      expect(fetchedTestJob.status).toBe('created');
+    });
+
+    it('rejects multi-job workflow with circular dependencies', async () => {
+      const cycleYaml = `
+name: cycle-pipeline
+jobs:
+  job1:
+    needs: [job2]
+    run: echo 1
+  job2:
+    needs: [job1]
+    run: echo 2
+`;
+
+      const submitRes = await app.inject({
+        method: 'POST',
+        url: '/workflows/runs',
+        headers: { 'content-type': 'application/x-yaml' },
+        payload: cycleYaml,
+      });
+
+      expect(submitRes.statusCode).toBe(400);
+      expect(submitRes.json().error.message).toContain('Circular dependency detected');
+    });
+  });
 });
 
 
