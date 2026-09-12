@@ -1,0 +1,17 @@
+{
+  "name": "@mini-ci/scheduler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@mini-ci/types": "workspace:*",
+    "@mini-ci/db": "workspace:*",
+    "@mini-ci/queue": "workspace:*"
+  }
+}

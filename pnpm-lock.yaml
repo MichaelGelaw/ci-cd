@@ -77,6 +77,18 @@ importers:
         specifier: ^5.4.2
         version: 5.11.1
 
+  packages/scheduler:
+    dependencies:
+      '@mini-ci/db':
+        specifier: workspace:*
+        version: link:../db
+      '@mini-ci/queue':
+        specifier: workspace:*
+        version: link:../queue
+      '@mini-ci/types':
+        specifier: workspace:*
+        version: link:../types
+
   packages/types: {}
 
 packages:
