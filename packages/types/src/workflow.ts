@@ -405,5 +405,45 @@ export interface WebhookTriggerResult {
   message?: string;
 }
 
+// System Statistics (Milestone 19)
+
+export interface SystemStats {
+  runs: {
+    total: number;
+    pending: number;
+    running: number;
+    succeeded: number;
+    failed: number;
+    cancelled: number;
+  };
+  jobs: {
+    total: number;
+    created: number;
+    queued: number;
+    assigned: number;
+    running: number;
+    succeeded: number;
+    failed: number;
+    cancelled: number;
+    timed_out: number;
+    retrying: number;
+  };
+  workers: {
+    total: number;
+    ready: number;
+    busy: number;
+    offline: number;
+    paused: number;
+  };
+  repositories: {
+    total: number;
+  };
+  artifacts: {
+    total: number;
+    totalBytes: number;
+  };
+}
+
+
 
 

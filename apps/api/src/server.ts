@@ -9,9 +9,23 @@ import { schedulerRoutes } from './routes/scheduler.js';
 import { artifactRoutes } from './routes/artifacts.js';
 import { repositoryRoutes } from './routes/repositories.js';
 import { webhookRoutes } from './routes/webhooks.js';
+import { statsRoutes } from './routes/stats.js';
 
 export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
   const app = fastify(opts);
+
+  // Enable CORS for dashboard and browser clients
+  app.addHook('onRequest', async (req, reply) => {
+    reply.header('Access-Control-Allow-Origin', '*');
+    reply.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    reply.header(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization, X-Hub-Signature-256, X-GitHub-Event, X-Artifact-Name, X-Artifact-Path',
+    );
+    if (req.method === 'OPTIONS') {
+      reply.status(200).send();
+    }
+  });
 
   // Register multipart plugin for file uploads
   app.register(multipart, {
@@ -87,6 +101,7 @@ export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
   app.register(artifactRoutes);
   app.register(repositoryRoutes);
   app.register(webhookRoutes);
+  app.register(statsRoutes);
 
   return app;
 }

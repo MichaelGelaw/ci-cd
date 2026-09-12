@@ -48,6 +48,8 @@ export {
   createRegisteredWorkflow,
   getRegisteredWorkflow,
   listRegisteredWorkflows,
+  listAllArtifacts,
+  getSystemStats,
 } from './repository.js';
 export type {
   CreateWorkflowRunOptions,

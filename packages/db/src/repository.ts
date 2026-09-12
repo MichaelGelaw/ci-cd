@@ -14,6 +14,7 @@ import type {
   CreateRepositoryParams,
   RegisteredWorkflowRecord,
   CreateRegisteredWorkflowParams,
+  SystemStats,
 } from '@mini-ci/types';
 import { randomUUID } from 'node:crypto';
 import { getPool } from './connection.js';
@@ -2371,6 +2372,120 @@ export async function listRegisteredWorkflows(
   const { rows } = await pool.query<RegisteredWorkflowRecord>(queryStr, values);
   return rows;
 }
+
+export async function listAllArtifacts(
+  limit: number = 50,
+  offset: number = 0,
+): Promise<ArtifactRecord[]> {
+  const pool = getPool();
+  const { rows } = await pool.query<ArtifactRecord>(
+    `
+    SELECT
+      id,
+      job_id,
+      workflow_run_id,
+      name,
+      path,
+      size_bytes,
+      mime_type,
+      storage_path,
+      checksum,
+      created_at::text
+    FROM artifacts
+    ORDER BY created_at DESC
+    LIMIT $1 OFFSET $2;
+    `,
+    [limit, offset],
+  );
+
+  return rows;
+}
+
+export async function getSystemStats(): Promise<SystemStats> {
+  const pool = getPool();
+
+  const [runsRes, jobsRes, workersRes, reposRes, artifactsRes] = await Promise.all([
+    pool.query<{ status: string; count: string }>(
+      `SELECT status, COUNT(*)::text as count FROM workflow_runs GROUP BY status;`,
+    ),
+    pool.query<{ status: string; count: string }>(
+      `SELECT status, COUNT(*)::text as count FROM jobs GROUP BY status;`,
+    ),
+    pool.query<{ status: string; count: string }>(
+      `SELECT status, COUNT(*)::text as count FROM workers GROUP BY status;`,
+    ),
+    pool.query<{ count: string }>(`SELECT COUNT(*)::text as count FROM repositories;`),
+    pool.query<{ count: string; total_bytes: string }>(
+      `SELECT COUNT(*)::text as count, COALESCE(SUM(size_bytes), 0)::text as total_bytes FROM artifacts;`,
+    ),
+  ]);
+
+  const runsMap: Record<string, number> = {};
+  let totalRuns = 0;
+  for (const row of runsRes.rows) {
+    const c = parseInt(row.count, 10) || 0;
+    runsMap[row.status] = c;
+    totalRuns += c;
+  }
+
+  const jobsMap: Record<string, number> = {};
+  let totalJobs = 0;
+  for (const row of jobsRes.rows) {
+    const c = parseInt(row.count, 10) || 0;
+    jobsMap[row.status] = c;
+    totalJobs += c;
+  }
+
+  const workersMap: Record<string, number> = {};
+  let totalWorkers = 0;
+  for (const row of workersRes.rows) {
+    const c = parseInt(row.count, 10) || 0;
+    workersMap[row.status] = c;
+    totalWorkers += c;
+  }
+
+  const totalRepos = parseInt(reposRes.rows[0]?.count ?? '0', 10) || 0;
+  const totalArtifacts = parseInt(artifactsRes.rows[0]?.count ?? '0', 10) || 0;
+  const totalArtifactBytes = parseInt(artifactsRes.rows[0]?.total_bytes ?? '0', 10) || 0;
+
+  return {
+    runs: {
+      total: totalRuns,
+      pending: runsMap['pending'] ?? 0,
+      running: runsMap['running'] ?? 0,
+      succeeded: runsMap['succeeded'] ?? 0,
+      failed: runsMap['failed'] ?? 0,
+      cancelled: runsMap['cancelled'] ?? 0,
+    },
+    jobs: {
+      total: totalJobs,
+      created: jobsMap['created'] ?? 0,
+      queued: jobsMap['queued'] ?? 0,
+      assigned: jobsMap['assigned'] ?? 0,
+      running: jobsMap['running'] ?? 0,
+      succeeded: jobsMap['succeeded'] ?? 0,
+      failed: jobsMap['failed'] ?? 0,
+      cancelled: jobsMap['cancelled'] ?? 0,
+      timed_out: jobsMap['timed_out'] ?? 0,
+      retrying: jobsMap['retrying'] ?? 0,
+    },
+    workers: {
+      total: totalWorkers,
+      ready: workersMap['ready'] ?? 0,
+      busy: workersMap['busy'] ?? 0,
+      offline: workersMap['offline'] ?? 0,
+      paused: workersMap['paused'] ?? 0,
+    },
+    repositories: {
+      total: totalRepos,
+    },
+    artifacts: {
+      total: totalArtifacts,
+      totalBytes: totalArtifactBytes,
+    },
+  };
+}
+
 
 
 

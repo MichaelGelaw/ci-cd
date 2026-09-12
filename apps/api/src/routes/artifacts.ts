@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { listAllArtifacts } from '@mini-ci/db';
 import {
   uploadArtifactService,
   getJobArtifactsService,
@@ -197,5 +198,14 @@ export const artifactRoutes: FastifyPluginAsync = async (app) => {
     }
 
     return reply.status(200).send({ success: true });
+  });
+
+  app.get('/artifacts', async (request, reply) => {
+    const query = request.query as Record<string, string | undefined>;
+    const limit = Math.min(Math.max(Number(query['limit'] ?? 50), 1), 100);
+    const offset = Math.max(Number(query['offset'] ?? 0), 0);
+
+    const artifacts = await listAllArtifacts(limit, offset);
+    return reply.status(200).send({ artifacts, limit, offset });
   });
 };
