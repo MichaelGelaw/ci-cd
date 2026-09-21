@@ -40,6 +40,16 @@ export async function runStepInDocker(
   signal?: AbortSignal,
 ): Promise<DockerStepResult> {
   let container: Docker.Container | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let cancelled = false;
+  const onAbort = async () => {
+    cancelled = true;
+    try {
+      await container?.kill();
+    } catch {
+      // Container may have already stopped.
+    }
+  };
 
   if (signal?.aborted) {
     return {
@@ -52,6 +62,10 @@ export async function runStepInDocker(
 
   try {
     await pullImage(image);
+
+    if (signal?.aborted) {
+      throw new Error('Cancelled by user request');
+    }
 
     container = await docker.createContainer({
       Image: image,
@@ -67,28 +81,17 @@ export async function runStepInDocker(
       AttachStderr: true,
     });
 
+    if (signal?.aborted) {
+      throw new Error('Cancelled by user request');
+    }
+
     await container.start();
 
     // Set up timeout if configured.
     let killed = false;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-
-    const onAbort = async () => {
-      cancelled = true;
-      try {
-        await container!.kill();
-      } catch {
-        try {
-          await container!.stop({ t: 1 });
-        } catch {
-          // Container may have already stopped.
-        }
-      }
-    };
-
     if (signal) {
       signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) await onAbort();
     }
 
     if (timeoutMs !== undefined) {
@@ -150,6 +153,8 @@ export async function runStepInDocker(
       error: (error as Error).message,
     };
   } finally {
+    if (timer) clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
     if (container) {
       try {
         await container.remove({ force: true });
