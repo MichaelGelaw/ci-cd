@@ -4,6 +4,16 @@ import redis
 from src.queue_consumer import QueueConsumer
 
 
+@pytest.mark.parametrize("payload", ["null", "[]", "1", '"string"', "{}", '{"jobId":42}'])
+def test_queue_consumer_discards_invalid_json_shapes(payload):
+    consumer = QueueConsumer("redis://localhost:6379", queue_key="mini_ci:test:invalid:queue")
+    consumer.redis.delete(consumer.queue_key, consumer.processing_key)
+    consumer.redis.lpush(consumer.queue_key, payload)
+    assert consumer.pop_job(timeout_seconds=1) is None
+    assert consumer.redis.llen(consumer.processing_key) == 0
+    consumer.close()
+
+
 @pytest.mark.integration
 def test_queue_consumer_malformed_json_handling():
     consumer = QueueConsumer(

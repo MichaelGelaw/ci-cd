@@ -75,10 +75,10 @@ steps:
     expect(body.jobs[0].name).toBe('step-1');
     expect(body.jobs[0].status).toBe('queued');
     expect(body.jobs[1].name).toBe('step-2');
-    expect(body.jobs[1].status).toBe('queued');
+    expect(body.jobs[1].status).toBe('created');
 
     const queueLength = await getQueueLength();
-    expect(queueLength).toBeGreaterThanOrEqual(2);
+    expect(queueLength).toBeGreaterThanOrEqual(1);
   });
 
   it('POST /workflows/runs creates a run from JSON body containing yaml', async () => {
@@ -247,7 +247,7 @@ steps:
     const runRes = await app.inject({
       method: 'POST',
       url: `/jobs/${jobId}/status`,
-      payload: { status: 'running' },
+      payload: { status: 'running', worker_id: 'worker-test-1' },
     });
     expect(runRes.statusCode).toBe(200);
     expect(runRes.json().job.status).toBe('running');
@@ -260,6 +260,7 @@ steps:
         status: 'succeeded',
         exit_code: 0,
         stdout: 'job output',
+        worker_id: 'worker-test-1',
         duration_ms: 150,
       },
     });
@@ -684,6 +685,7 @@ steps:
           status: 'failed',
           exit_code: 1,
           stderr: 'Temporary network failure',
+          worker_id: 'worker-r1',
         },
       });
 
@@ -759,6 +761,7 @@ steps:
           status: 'succeeded',
           exit_code: 0,
           stdout: 'Success on retry!',
+          worker_id: 'worker-r2',
         },
       });
       expect(succeedRes.statusCode).toBe(200);
@@ -1571,5 +1574,4 @@ jobs:
     });
   });
 });
-
 

@@ -229,58 +229,70 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       });
     }
 
-    reply.raw.setHeader('Content-Type', 'text/event-stream');
-    reply.raw.setHeader('Cache-Control', 'no-cache');
-    reply.raw.setHeader('Connection', 'keep-alive');
-    reply.raw.setHeader('X-Accel-Buffering', 'no');
-    reply.raw.flushHeaders();
+    let closed = false;
+    let replaying = true;
+    const pending: LogEvent[] = [];
+    let unsubscribe: (() => Promise<void>) | undefined;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      void unsubscribe?.().catch(() => {});
+      reply.raw.end();
+    };
+    reply.raw.on('close', close);
 
     const sendEvent = (event: LogEvent) => {
+      if (closed) return;
       reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+      if ('event' in event && event.event === 'end') close();
     };
 
-    // Replay buffered events
-    const buffered = await getBufferedLogs(id);
-    let sawEnd = false;
-    for (const ev of buffered) {
-      sendEvent(ev);
-      if ('event' in ev && ev.event === 'end') {
-        sawEnd = true;
+    try {
+      // Subscribe before reading the buffer so events cannot fall between replay and live delivery.
+      unsubscribe = await subscribeJobLogs(id, (event) => {
+        if (replaying) pending.push(event);
+        else sendEvent(event);
+      });
+      if (closed) {
+        await unsubscribe();
+        return;
       }
+      const buffered = await getBufferedLogs(id);
+      const currentJob = await getJobDetails(id) ?? job;
+      reply.hijack();
+      for (const [name, value] of Object.entries(reply.getHeaders())) {
+        if (value !== undefined) reply.raw.setHeader(name, value);
+      }
+      reply.raw.setHeader('Content-Type', 'text/event-stream');
+      reply.raw.setHeader('Cache-Control', 'no-cache');
+      reply.raw.setHeader('Connection', 'keep-alive');
+      reply.raw.setHeader('X-Accel-Buffering', 'no');
+      reply.raw.flushHeaders();
+
+      const replayCounts = new Map<string, number>();
+      for (const event of buffered) {
+        // An older attempt's end marker must not close the current attempt's stream.
+        if ('event' in event && event.event === 'end' &&
+            event.attempt !== undefined && event.attempt !== currentJob.attempt) continue;
+        const key = JSON.stringify(event);
+        replayCounts.set(key, (replayCounts.get(key) ?? 0) + 1);
+        sendEvent(event);
+      }
+      replaying = false;
+      for (const event of pending) {
+        const key = JSON.stringify(event);
+        const count = replayCounts.get(key) ?? 0;
+        if (count > 0) replayCounts.set(key, count - 1);
+        else sendEvent(event);
+      }
+      if (['succeeded', 'failed', 'cancelled', 'timed_out'].includes(currentJob.status)) {
+        sendEvent({ jobId: id, event: 'end', exitCode: currentJob.exit_code });
+      }
+    } catch (error) {
+      await unsubscribe?.().catch(() => {});
+      if (reply.raw.headersSent) close();
+      else throw error;
     }
-
-    const isTerminal = ['succeeded', 'failed', 'cancelled', 'timed_out'].includes(job.status);
-
-    if (sawEnd || isTerminal) {
-      if (!sawEnd) {
-        sendEvent({
-          jobId: id,
-          event: 'end',
-          exitCode: job.exit_code,
-          durationMs: job.duration_ms ?? undefined,
-        });
-      }
-      reply.raw.end();
-      return;
-    }
-
-    // Subscribe to live log stream
-    let closed = false;
-    const unsubscribe = await subscribeJobLogs(id, (event) => {
-      if (closed) return;
-      sendEvent(event);
-      if ('event' in event && event.event === 'end') {
-        closed = true;
-        unsubscribe().finally(() => {
-          reply.raw.end();
-        });
-      }
-    });
-
-    reply.raw.on('close', () => {
-      closed = true;
-      unsubscribe().catch(() => {});
-    });
   });
 
   app.post('/jobs/:id/status', async (request, reply) => {
@@ -300,6 +312,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       const job = await updateJobExecutionStatus(id, {
         status: body['status'] as JobStatus,
         workerId: typeof body['worker_id'] === 'string' ? body['worker_id'] : undefined,
+        leaseToken: typeof body['lease_token'] === 'string' ? body['lease_token'] : undefined,
         exitCode: typeof body['exit_code'] === 'number' ? body['exit_code'] : undefined,
         stdout: typeof body['stdout'] === 'string' ? body['stdout'] : undefined,
         stderr: typeof body['stderr'] === 'string' ? body['stderr'] : undefined,
@@ -315,6 +328,10 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       return reply.status(200).send({ job });
     } catch (err) {
       const message = (err as Error).message;
+
+      if (err instanceof LeaseConflictError) {
+        return reply.status(409).send({ error: { message, code: 'LEASE_CONFLICT' } });
+      }
 
       if (message.includes('not found')) {
         return reply.status(404).send({
@@ -463,4 +480,3 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 };
-

@@ -30,6 +30,7 @@ class Worker:
         )
         self.api = ApiClient(self.config.api_url, api_key=self.config.api_key)
         self.running = False
+        self.stopping = False
         self.is_registered = False
         self.current_status = "ready"
         self.heartbeat_sender = HeartbeatSender(
@@ -73,13 +74,17 @@ class Worker:
         self.heartbeat_sender.api = self.api
         return self.heartbeat_sender.send_now(status)
 
-    def stop(self) -> None:
+    def request_stop(self) -> None:
+        self.stopping = True
         self.running = False
         if self.current_cancellation_event is not None:
             try:
                 self.current_cancellation_event.set()
             except Exception:
                 pass
+
+    def stop(self) -> None:
+        self.request_stop()
         self.heartbeat_sender.api = self.api
         self.heartbeat_sender.stop(final_status="offline")
         self.consumer.close()
@@ -96,17 +101,17 @@ class Worker:
             return False
 
         trace_id = message.get("traceId") or message.get("correlationId") or job_id
-        self._process_job(job_id, trace_id=trace_id)
+        self._process_job(job_id, trace_id=trace_id, expected_attempt=message.get("attempt"))
         return True
 
-    def _process_job(self, job_id: str, trace_id: Optional[str] = None) -> None:
+    def _process_job(self, job_id: str, trace_id: Optional[str] = None, expected_attempt: Optional[int] = None) -> None:
         set_log_context(job_id=job_id, trace_id=trace_id or job_id, worker_id=self.config.worker_id)
         try:
-            self._execute_job(job_id)
+            self._execute_job(job_id, expected_attempt)
         finally:
             clear_log_context()
 
-    def _execute_job(self, job_id: str) -> None:
+    def _execute_job(self, job_id: str, expected_attempt: Optional[int] = None) -> None:
         logger.info(f"Worker {self.config.worker_id} claimed job {job_id}")
 
         job = self.api.get_job(job_id)
@@ -123,34 +128,49 @@ class Worker:
         except Exception:
             pass
 
-        if is_cancelled or job.get("status") in ("succeeded", "failed", "cancelled", "retrying"):
+        if is_cancelled or job.get("status") in ("succeeded", "failed", "cancelled", "timed_out", "retrying"):
             logger.info(f"Job {job_id} already in terminal, retrying, or cancelled state")
             self.consumer.acknowledge_job(job_id)
             return
+
+        if job.get("worker_id") and job["worker_id"] != self.config.worker_id:
+            logger.warning(f"Skipping job {job_id}: assigned to another worker")
+            self.consumer.acknowledge_job(job_id)
+            return
+
+        if expected_attempt is not None and expected_attempt != job.get("attempt", 1):
+            logger.warning(f"Skipping stale queue message for job {job_id}")
+            self.consumer.acknowledge_job(job_id)
+            return
+
+        lease_fields = {"lease_token": job["lease_token"]} if job.get("lease_token") else {}
 
         # Mark worker busy
         self.heartbeat(status="busy")
 
         # Transition: queued -> assigned
         try:
-            self.api.update_job_status(job_id, status="assigned", worker_id=self.config.worker_id)
+            self.api.update_job_status(job_id, status="assigned", worker_id=self.config.worker_id, **lease_fields)
         except Exception as e:
             logger.warning(f"Could not transition job {job_id} to assigned: {e}")
 
         # Transition: assigned -> running
         try:
-            running_resp = self.api.update_job_status(job_id, status="running", worker_id=self.config.worker_id)
+            running_resp = self.api.update_job_status(job_id, status="running", worker_id=self.config.worker_id, **lease_fields)
             if running_resp and isinstance(running_resp, dict) and running_resp.get("job"):
-                job = running_resp["job"]
+                job = {**job, **running_resp["job"]}
         except Exception as e:
             logger.error(f"Could not transition job {job_id} to running: {e}")
             self.heartbeat(status="ready")
-            self.consumer.acknowledge_job(job_id)
+            if "INVALID_TRANSITION" in str(e) or "409" in str(e) or "LEASE_CONFLICT" in str(e):
+                self.consumer.acknowledge_job(job_id)
             return
 
         # Setup cancellation listener and event
         cancellation_event = threading.Event()
         self.current_cancellation_event = cancellation_event
+        if self.stopping:
+            cancellation_event.set()
         cancel_pubsub = None
         cancel_channel = f"mini_ci:jobs:{job_id}:cancel"
         try:
@@ -211,6 +231,7 @@ class Worker:
                 logger.warning(f"Failed to publish log chunk for job {job_id}: {ex}")
 
         container_name = f"mini-ci-job-{job_id}-{attempt_num}"
+        report_complete = False
         try:
             with tempfile.TemporaryDirectory(prefix="mini-ci-job-") as workspace_dir:
                 result = CommandExecutor.execute(
@@ -243,30 +264,18 @@ class Worker:
                     except Exception as e:
                         logger.error(f"Failed to collect artifacts for job {job_id}: {e}")
 
-            # Publish log end event
-            end_payload = json.dumps({
-                "jobId": job_id,
-                "event": "end",
-                "exitCode": result.exit_code,
-                "durationMs": result.duration_ms,
-            })
-            try:
-                self.consumer.redis.rpush(f"mini_ci:jobs:{job_id}:log_chunks", end_payload)
-                self.consumer.redis.expire(
-                    f"mini_ci:jobs:{job_id}:log_chunks", self.config.log_ttl_seconds
-                )
-                self.consumer.redis.publish(f"mini_ci:jobs:{job_id}:logs", end_payload)
-            except Exception as ex:
-                logger.warning(f"Failed to publish log end event for job {job_id}: {ex}")
-
             if cancellation_event.is_set() or cancelled_in_redis:
+                report_complete = True
                 logger.info(f"Job {job_id} was cancelled during execution; skipping status update")
             elif renewer and renewer.is_conflict():
+                report_complete = True
                 logger.error(
                     f"Worker fenced out: lease for job {job_id} was lost during execution; skipping status update"
                 )
             else:
                 final_status = "succeeded" if result.exit_code == 0 and not result.error else "failed"
+                if result.error and result.error.startswith("Step timed out"):
+                    final_status = "timed_out"
                 # Transition: running -> succeeded / failed
                 try:
                     resp = self.api.update_job_status(
@@ -278,7 +287,9 @@ class Worker:
                         stderr=result.stderr,
                         error=result.error,
                         duration_ms=result.duration_ms,
+                        **lease_fields,
                     )
+                    report_complete = True
                     reported_job = resp.get("job", {}) if isinstance(resp, dict) else {}
                     reported_status = reported_job.get("status", final_status)
                     if reported_status == "retrying":
@@ -290,11 +301,29 @@ class Worker:
                 except Exception as e:
                     err_str = str(e)
                     if "INVALID_TRANSITION" in err_str or "LEASE_CONFLICT" in err_str or "409" in err_str:
+                        report_complete = True
                         logger.warning(
                             f"Job {job_id} was recovered or transitioned by control plane; status update ignored: {e}"
                         )
                     else:
                         logger.error(f"Failed to report final status for job {job_id}: {e}")
+
+            # Readers refresh job state on end, so persist the result first.
+            end_payload = json.dumps({
+                "jobId": job_id,
+                "event": "end",
+                "exitCode": result.exit_code,
+                "durationMs": result.duration_ms,
+                "attempt": attempt_num,
+            })
+            try:
+                self.consumer.redis.rpush(f"mini_ci:jobs:{job_id}:log_chunks", end_payload)
+                self.consumer.redis.expire(
+                    f"mini_ci:jobs:{job_id}:log_chunks", self.config.log_ttl_seconds
+                )
+                self.consumer.redis.publish(f"mini_ci:jobs:{job_id}:logs", end_payload)
+            except Exception as ex:
+                logger.warning(f"Failed to publish log end event for job {job_id}: {ex}")
         except Exception as e:
             logger.error(f"Unexpected error executing job {job_id}: {e}")
             if cancellation_event and not cancellation_event.is_set():
@@ -304,7 +333,9 @@ class Worker:
                         status="failed",
                         worker_id=self.config.worker_id,
                         error=f"Execution worker error: {e}",
+                        **lease_fields,
                     )
+                    report_complete = True
                 except Exception as report_err:
                     logger.warning(f"Could not report failure for crashed job {job_id}: {report_err}")
         finally:
@@ -318,8 +349,9 @@ class Worker:
             if renewer:
                 renewer.stop()
             # Return worker to ready state and acknowledge in Redis
-            self.heartbeat(status="ready")
-            self.consumer.acknowledge_job(job_id)
+            self.heartbeat(status="offline" if self.stopping else "ready")
+            if report_complete:
+                self.consumer.acknowledge_job(job_id)
 
     def run_forever(self) -> None:
         if not self.register():
@@ -338,6 +370,9 @@ class Worker:
                 )
                 return
 
+        if self.stopping:
+            self.stop()
+            return
         self.heartbeat_sender.start()
         self.running = True
         logger.info(f"Worker {self.config.worker_id} listening for jobs...")

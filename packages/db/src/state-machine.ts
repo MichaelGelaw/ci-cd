@@ -8,7 +8,7 @@ const LEGAL_TRANSITIONS: Record<JobStatus, readonly JobStatus[]> = {
   running: ['succeeded', 'failed', 'cancelled', 'timed_out'],
   failed: ['retrying'],
   timed_out: ['retrying'],
-  retrying: ['queued'],
+  retrying: ['queued', 'cancelled'],
   succeeded: [],
   cancelled: [],
 };

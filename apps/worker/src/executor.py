@@ -34,8 +34,7 @@ def _kill_process_safely(proc: subprocess.Popen, sig: int = signal.SIGTERM) -> N
             pass
     else:
         try:
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, sig)
+            os.killpg(proc.pid, sig)
         except (OSError, AttributeError, ProcessLookupError):
             try:
                 proc.kill()
@@ -80,6 +79,8 @@ class CommandExecutor:
         memory_limit: str = "512m",
         cpu_limit: str = "1.0",
     ) -> ExecutionResult:
+        if cancellation_event and cancellation_event.is_set():
+            return ExecutionResult(None, "", "", 0, "Cancelled by user request")
         if workspace_dir:
             return CommandExecutor._run_in_workspace(
                 command=command,
@@ -196,6 +197,10 @@ class CommandExecutor:
             except (subprocess.TimeoutExpired, Exception):
                 _kill_process_safely(proc, signal.SIGKILL)
 
+            # The shell can exit on SIGTERM while a descendant ignores it.
+            _kill_process_safely(proc, signal.SIGKILL)
+            proc.wait()
+
             t_out.join(timeout=1.0)
             t_err.join(timeout=1.0)
             duration_ms = int((time.time() - start_time) * 1000)
@@ -210,6 +215,7 @@ class CommandExecutor:
         if timed_out:
             _cleanup_container(container_name)
             _kill_process_safely(proc, signal.SIGKILL)
+            proc.wait()
 
             t_out.join(timeout=1.0)
             t_err.join(timeout=1.0)
@@ -252,6 +258,8 @@ class CommandExecutor:
                 stderr=subprocess.PIPE,
                 start_new_session=start_session,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
             )
             return CommandExecutor._stream_process(
@@ -316,6 +324,8 @@ class CommandExecutor:
                 stderr=subprocess.PIPE,
                 start_new_session=start_session,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
             )
             return CommandExecutor._stream_process(

@@ -35,7 +35,7 @@ const ACKNOWLEDGE_LUA = `
 local items = redis.call('LRANGE', KEYS[1], 0, -1)
 for i, item in ipairs(items) do
   local ok, data = pcall(cjson.decode, item)
-  if ok and data then
+  if ok and type(data) == 'table' then
     local jid = data.jobId or data.job_id
     if jid == ARGV[1] then
       redis.call('LREM', KEYS[1], 1, item)

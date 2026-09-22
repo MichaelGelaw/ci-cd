@@ -472,7 +472,10 @@ describe('Database Repository', () => {
       [job1.id],
     );
 
-    // Create job 2: assigned to worker1, retries exhausted (maxAttempts: 1)
+    const worker2 = await registerWorker({
+      id: `worker-crashed-second-${Date.now()}`, name: 'worker-crashed-second', tags: ['docker'],
+    });
+    // A worker has capacity for one active job.
     const job2 = await createJob({
       workflowRunId: run.id,
       name: 'step-exhausted-retries',
@@ -480,10 +483,11 @@ describe('Database Repository', () => {
       maxAttempts: 1,
     });
     await updateJobStatus(job2.id, 'queued');
-    await assignJobToWorker(job2.id, worker1.id, 30);
+    await assignJobToWorker(job2.id, worker2.id, 30);
 
     // Set worker1 to offline (simulating worker crash/reaping)
     await updateWorkerStatus(worker1.id, 'offline');
+    await updateWorkerStatus(worker2.id, 'offline');
 
     // findRecoverableJobs should find both job1 and job2
     const recoverable = await findRecoverableJobs();
@@ -521,6 +525,7 @@ describe('Database Repository', () => {
       maxAttempts: 3,
     });
     await updateJobStatus(job3.id, 'queued');
+    await updateWorkerStatus(worker1.id, 'ready');
     await assignJobToWorker(job3.id, worker1.id, 30);
 
     const recovery3 = await recoverJob(job3.id, 'Immediate recovery test', {
@@ -539,7 +544,9 @@ describe('Database Repository', () => {
       maxAttempts: 2,
     });
     await updateJobStatus(job4.id, 'queued');
+    await updateWorkerStatus(worker1.id, 'ready');
     await assignJobToWorker(job4.id, worker1.id, 30);
+    await updateWorkerStatus(worker1.id, 'offline');
 
     const batchRecovered = await recoverStaleJobs();
     expect(batchRecovered.some((r) => r.job.id === job4.id)).toBe(true);
@@ -926,7 +933,6 @@ describe('Database Repository', () => {
     expect(checkWf).toBeNull();
   });
 });
-
 
 
 

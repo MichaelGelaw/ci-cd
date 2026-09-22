@@ -7,6 +7,7 @@ import type {
 } from '@mini-ci/types';
 import {
   getJob,
+  getPool,
   updateJobStatus,
   getJobAttempts,
   getJobsByWorkflowRun,
@@ -110,6 +111,7 @@ export async function updateJobExecutionStatus(
   params: {
     status: JobStatus;
     workerId?: string;
+    leaseToken?: string;
     exitCode?: number | null;
     stdout?: string;
     stderr?: string;
@@ -117,80 +119,39 @@ export async function updateJobExecutionStatus(
     durationMs?: number | null;
   },
 ): Promise<JobRecord> {
-  const existing = await getJob(jobId);
-  if (!existing) {
-    throw new Error(`Job ${jobId} not found`);
-  }
+  const client = await getPool().connect();
+  let updatedJob: JobRecord;
+  try {
+    await client.query('BEGIN');
+    const existing = await getJob(jobId, client);
+    if (!existing) throw new Error(`Job ${jobId} not found`);
 
-  const updates: Parameters<typeof updateJobStatus>[2] = {
-    exitCode: params.exitCode,
-    stdout: params.stdout,
-    stderr: params.stderr,
-    error: params.error,
-    workerId: params.workerId,
-    durationMs: params.durationMs,
-  };
-
-  if (params.status === 'running') {
-    updates.startedAt = new Date();
-  } else if (params.status === 'succeeded' || params.status === 'failed' || params.status === 'cancelled' || params.status === 'timed_out') {
-    updates.finishedAt = new Date();
-  }
-
-  // Check if job failure is eligible for retry
-  if (params.status === 'failed' || params.status === 'timed_out') {
-    const isRetryable =
-      existing.attempt < existing.max_attempts &&
-      isFailureRetryable(params.status, existing.retry_policy ?? undefined);
-
-    if (isRetryable) {
-      const delaySeconds = calculateRetryDelay(existing.attempt, existing.retry_policy ?? undefined);
-      const finishedAt = new Date();
-
-      // Record this attempt before transitioning
-      try {
-        await recordJobAttempt({
-          jobId: existing.id,
-          attemptNumber: existing.attempt,
-          status: params.status,
-          exitCode: params.exitCode,
-          stdout: params.stdout,
-          stderr: params.stderr,
-          error: params.error,
-          durationMs: params.durationMs,
-          startedAt: existing.started_at ?? undefined,
-          finishedAt,
-        });
-      } catch {
-        // Best-effort attempt recording
+    if (existing.lease_token || params.leaseToken) {
+      if (!existing.lease_token || existing.lease_token !== params.leaseToken ||
+          existing.worker_id !== params.workerId || !existing.lease_expires_at ||
+          new Date(existing.lease_expires_at).getTime() <= Date.now()) {
+        throw new LeaseConflictError(`Job ${jobId} lease ownership changed or expired`);
       }
-
-      // Legal state transition: running -> failed/timed_out -> retrying
-      await updateJobStatus(jobId, params.status, {
-        exitCode: params.exitCode,
-        stdout: params.stdout,
-        stderr: params.stderr,
-        error: params.error,
-        durationMs: params.durationMs,
-        finishedAt,
-      });
-
-      const nextRetryAt = new Date(Date.now() + delaySeconds * 1000);
-      const retryingJob = await updateJobStatus(jobId, 'retrying', {
-        nextRetryAt,
-      });
-
-      return retryingJob;
+    } else if (existing.worker_id && params.workerId !== existing.worker_id) {
+      throw new LeaseConflictError(`Job ${jobId} belongs to another worker`);
     }
-  }
 
-  const updatedJob = await updateJobStatus(jobId, params.status, updates);
+    const terminal = ['succeeded', 'failed', 'cancelled', 'timed_out'].includes(params.status);
+    updatedJob = await updateJobStatus(jobId, params.status, {
+      exitCode: params.exitCode,
+      stdout: params.stdout,
+      stderr: params.stderr,
+      error: params.error,
+      workerId: params.workerId,
+      durationMs: params.durationMs,
+      startedAt: params.status === 'running' ? existing.started_at ?? new Date() : undefined,
+      finishedAt: terminal ? new Date() : undefined,
+    }, client);
 
-  // If entering terminal or running status, record attempt
-  if (params.status === 'running' || params.status === 'succeeded' || params.status === 'failed' || params.status === 'timed_out') {
-    try {
+    if (params.status === 'running' || params.status === 'succeeded' ||
+        params.status === 'failed' || params.status === 'cancelled' || params.status === 'timed_out') {
       await recordJobAttempt({
-        jobId: updatedJob.id,
+        jobId,
         attemptNumber: updatedJob.attempt,
         status: params.status,
         exitCode: params.exitCode,
@@ -200,11 +161,25 @@ export async function updateJobExecutionStatus(
         durationMs: params.durationMs,
         startedAt: updatedJob.started_at ?? undefined,
         finishedAt: updatedJob.finished_at ?? undefined,
-      });
-    } catch {
-      // Best-effort attempt recording
+      }, client);
     }
+
+    if (existing.attempt < existing.max_attempts &&
+        isFailureRetryable(params.status, existing.retry_policy ?? undefined)) {
+      const delay = calculateRetryDelay(existing.attempt, existing.retry_policy ?? undefined);
+      updatedJob = await updateJobStatus(jobId, 'retrying', {
+        nextRetryAt: new Date(Date.now() + delay * 1000),
+      }, client);
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
+
+  if (updatedJob.status === 'retrying') return updatedJob;
 
   // Advance DAG dependencies or prune unreachable dependents
   if (params.status === 'succeeded') {

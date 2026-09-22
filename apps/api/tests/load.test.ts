@@ -63,9 +63,9 @@ steps:
       expect(body.jobs).toHaveLength(2);
     }
 
-    // Queue must contain all generated jobs
+    // Only each workflow's first step is runnable until its dependency succeeds.
     const queueDepth = await getQueueLength();
-    expect(queueDepth).toBeGreaterThanOrEqual(numRuns * 2);
+    expect(queueDepth).toBeGreaterThanOrEqual(numRuns);
   });
 
   it('2. Scheduler drains backlog across multiple workers respecting concurrency', async () => {

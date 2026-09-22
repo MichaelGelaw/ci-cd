@@ -1,8 +1,8 @@
 import {
   listQueuedJobs,
   listWorkers,
+  reapDeadWorkers,
   assignJobToWorker,
-  updateWorkerStatus,
   countActiveJobsForWorkflowRun,
   evaluateAndPromoteDependentJobs,
 } from '@mini-ci/db';
@@ -50,6 +50,7 @@ export class Scheduler {
   }
 
   async scheduleRound(): Promise<SchedulingDecision[]> {
+    await reapDeadWorkers();
     // 0. Advance DAG dependencies: promote ready created jobs to queued
     await this.evaluateDependencies();
 
@@ -94,8 +95,12 @@ export class Scheduler {
 
       // Atomically assign in PostgreSQL: queued -> assigned
       try {
-        await assignJobToWorker(job.id, worker.id);
-        await updateWorkerStatus(worker.id, 'busy');
+        await assignJobToWorker(job.id, worker.id, 30, this.options.maxConcurrencyPerWorkflow);
+
+        // Reserve capacity even if Redis dispatch fails; lease recovery handles that job.
+        const workerIndex = availableWorkerPool.findIndex((w) => w.id === worker.id);
+        if (workerIndex !== -1) availableWorkerPool.splice(workerIndex, 1);
+        workflowConcurrencyMap.set(job.workflow_run_id, activeCount + 1);
 
         // Dispatch to worker's dedicated queue in Redis
         await enqueueJobForWorker(worker.id, {
@@ -104,15 +109,6 @@ export class Scheduler {
           queuedAt: new Date().toISOString(),
           attempt: job.attempt,
         });
-
-        // Remove worker from available pool for this round
-        const workerIndex = availableWorkerPool.findIndex((w) => w.id === worker.id);
-        if (workerIndex !== -1) {
-          availableWorkerPool.splice(workerIndex, 1);
-        }
-
-        // Increment active concurrency count for this workflow
-        workflowConcurrencyMap.set(job.workflow_run_id, activeCount + 1);
 
         decisions.push({
           jobId: job.id,

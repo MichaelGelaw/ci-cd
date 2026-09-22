@@ -264,6 +264,7 @@ export interface LogEndEvent {
   event: 'end';
   exitCode?: number | null;
   durationMs?: number;
+  attempt?: number;
 }
 
 export type LogEvent = LogChunk | LogEndEvent;
@@ -445,7 +446,6 @@ export interface SystemStats {
     totalBytes: number;
   };
 }
-
 
 
 

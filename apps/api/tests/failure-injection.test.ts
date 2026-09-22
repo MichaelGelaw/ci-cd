@@ -80,6 +80,7 @@ steps:
       payload: {
         status: 'running',
         worker_id: 'chaos-worker-1',
+        lease_token: assignedJob!.lease_token,
       },
     });
     expect(runningRes.statusCode).toBe(200);
@@ -257,7 +258,11 @@ jobs:
     expect(depJob.status).toBe('created');
 
     // Simulate root-job executing and failing: queued -> assigned -> running -> failed
-    await assignJobToWorker(rootJob.id, 'chaos-worker-1');
+    await app.inject({
+      method: 'POST', url: '/workers/register',
+      payload: { id: 'chaos-dag-worker', name: 'DAG failure worker' },
+    });
+    await assignJobToWorker(rootJob.id, 'chaos-dag-worker');
     await updateJobStatus(rootJob.id, 'running');
     await updateJobStatus(rootJob.id, 'failed', {
       exitCode: 1,

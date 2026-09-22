@@ -1,3 +1,7 @@
+import { randomUUID } from 'node:crypto';
+
+import type { PoolClient } from 'pg';
+
 import type {
   WorkflowRunRecord,
   JobRecord,
@@ -16,7 +20,6 @@ import type {
   CreateRegisteredWorkflowParams,
   SystemStats,
 } from '@mini-ci/types';
-import { randomUUID } from 'node:crypto';
 import { getPool } from './connection.js';
 import { assertValidTransition } from './state-machine.js';
 import { calculateRetryDelay } from './retry.js';
@@ -34,8 +37,9 @@ export async function createWorkflowRun(
   workflowName: string,
   status: RunStatus = 'running',
   options?: CreateWorkflowRunOptions,
+  client?: PoolClient,
 ): Promise<WorkflowRunRecord> {
-  const pool = getPool();
+  const pool = client ?? getPool();
   const { rows } = await pool.query<WorkflowRunRecord>(
     `
     INSERT INTO workflow_runs (
@@ -221,8 +225,8 @@ export async function createJob(params: {
   status?: JobStatus;
   retryPolicy?: RetryPolicy;
   artifacts?: string[] | ArtifactConfig | null;
-}): Promise<JobRecord> {
-  const pool = getPool();
+}, client?: PoolClient): Promise<JobRecord> {
+  const pool = client ?? getPool();
   const retryPolicy = params.retryPolicy ?? {};
   const maxAttempts = params.retryPolicy?.max_attempts ?? params.maxAttempts ?? 1;
   const needs = params.needs ?? [];
@@ -292,8 +296,8 @@ export async function createJob(params: {
   return rows[0]!;
 }
 
-export async function getJob(id: string): Promise<JobRecord | null> {
-  const pool = getPool();
+export async function getJob(id: string, client?: PoolClient): Promise<JobRecord | null> {
+  const pool = client ?? getPool();
   const { rows } = await pool.query<JobRecord>(
     `
     SELECT
@@ -325,7 +329,7 @@ export async function getJob(id: string): Promise<JobRecord | null> {
       artifacts,
       created_at::text
     FROM jobs
-    WHERE id = $1;
+    WHERE id = $1 ${client ? 'FOR UPDATE' : ''};
     `,
     [id],
   );
@@ -440,15 +444,51 @@ export async function assignJobToWorker(
   jobId: string,
   workerId: string,
   leaseDurationSeconds: number = 30,
+  maxConcurrency?: number,
 ): Promise<JobRecord> {
   const leaseToken = randomUUID();
   const leaseExpiresAt = new Date(Date.now() + leaseDurationSeconds * 1000);
-  return updateJobStatus(jobId, 'assigned', {
-    workerId,
-    leaseToken,
-    leaseExpiresAt,
-    leaseDurationSeconds,
-  });
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    if (maxConcurrency !== undefined) {
+      await client.query(
+        'SELECT id FROM workflow_runs WHERE id = (SELECT workflow_run_id FROM jobs WHERE id = $1) FOR UPDATE',
+        [jobId],
+      );
+      const { rows } = await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM jobs WHERE workflow_run_id =
+         (SELECT workflow_run_id FROM jobs WHERE id = $1) AND status IN ('assigned', 'running')`,
+        [jobId],
+      );
+      if (Number(rows[0]!.count) >= maxConcurrency) throw new Error('Workflow concurrency limit reached');
+    }
+    const { rows: workers } = await client.query<{ status: WorkerStatus }>(
+      'SELECT status FROM workers WHERE id = $1 FOR UPDATE', [workerId],
+    );
+    if (workers.length > 0) {
+      const { rows: active } = await client.query(
+        `SELECT id FROM jobs WHERE worker_id = $1 AND status IN ('assigned', 'running')`, [workerId],
+      );
+      if (workers[0]!.status !== 'ready' || active.length > 0) {
+        throw new Error(`Worker ${workerId} is not available`);
+      }
+    }
+    const job = await getJob(jobId, client);
+    if (!job) throw new Error(`Job ${jobId} not found`);
+    if (job.status !== 'queued') throw new Error(`Job ${jobId} is no longer queued`);
+    const assigned = await updateJobStatus(jobId, 'assigned', {
+      workerId, leaseToken, leaseExpiresAt, leaseDurationSeconds,
+    }, client);
+    await client.query("UPDATE workers SET status = 'busy', updated_at = NOW() WHERE id = $1", [workerId]);
+    await client.query('COMMIT');
+    return assigned;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function updateJobStatus(
@@ -469,12 +509,13 @@ export async function updateJobStatus(
     nextRetryAt?: Date | string | null;
     retryPolicy?: RetryPolicy;
   } = {},
+  transaction?: PoolClient,
 ): Promise<JobRecord> {
   const pool = getPool();
-  const client = await pool.connect();
+  const client = transaction ?? await pool.connect();
 
   try {
-    await client.query('BEGIN');
+    if (!transaction) await client.query('BEGIN');
 
     // Row lock for atomic transition verification
     const { rows: existingRows } = await client.query<{ status: JobStatus }>(
@@ -560,6 +601,9 @@ export async function updateJobStatus(
       RETURNING
         id,
         workflow_run_id,
+        job_key,
+        needs,
+        artifacts,
         name,
         command,
         image,
@@ -585,13 +629,13 @@ export async function updateJobStatus(
     `;
 
     const { rows: updatedRows } = await client.query<JobRecord>(updateQuery, values);
-    await client.query('COMMIT');
+    if (!transaction) await client.query('COMMIT');
     return updatedRows[0]!;
   } catch (err) {
-    await client.query('ROLLBACK');
+    if (!transaction) await client.query('ROLLBACK');
     throw err;
   } finally {
-    client.release();
+    if (!transaction) client.release();
   }
 }
 
@@ -920,6 +964,9 @@ export async function requeueJobForRetry(jobId: string): Promise<JobRecord> {
     }
 
     const currentStatus = existingRows[0]!.status;
+    if (currentStatus !== 'retrying') {
+      throw new Error(`Job ${jobId} is no longer awaiting retry`);
+    }
     assertValidTransition(currentStatus, 'queued');
 
     const { rows: updatedRows } = await client.query<JobRecord>(
@@ -988,8 +1035,8 @@ export async function recordJobAttempt(params: {
   startedAt?: Date | string;
   finishedAt?: Date | string;
   durationMs?: number | null;
-}): Promise<JobAttemptRecord> {
-  const pool = getPool();
+}, client?: PoolClient): Promise<JobAttemptRecord> {
+  const pool = client ?? getPool();
   const { rows } = await pool.query<JobAttemptRecord>(
     `
     INSERT INTO job_attempts (
@@ -1371,6 +1418,7 @@ export async function findRecoverableJobs(
 
 export interface RecoverJobOptions {
   immediateRequeue?: boolean;
+  onlyIfStale?: FindRecoverableJobsOptions;
 }
 
 export interface RecoverJobResult {
@@ -1439,6 +1487,23 @@ export async function recoverJob(
         action: 'ignored',
         reason: `Job is in status '${job.status}', not eligible for recovery`,
       };
+    }
+
+    if (options.onlyIfStale) {
+      const { rows: stale } = await client.query(
+        `SELECT j.id FROM jobs j LEFT JOIN workers w ON j.worker_id = w.id
+         WHERE j.id = $1 AND (
+           j.lease_expires_at < NOW() - ($2 * interval '1 second') OR
+           (j.worker_id IS NOT NULL AND (w.status = 'offline' OR w.id IS NULL OR
+             w.last_heartbeat_at < NOW() - ($3 * interval '1 second')))
+         )`,
+        [jobId, options.onlyIfStale.leaseGracePeriodSeconds ?? 0,
+          options.onlyIfStale.heartbeatTimeoutSeconds ?? 30],
+      );
+      if (stale.length === 0) {
+        await client.query('ROLLBACK');
+        return { job, action: 'ignored', reason: 'Job lease and worker heartbeat are current' };
+      }
     }
 
     const finishedAt = new Date();
@@ -1708,7 +1773,7 @@ export async function recoverStaleJobs(
       ? `Worker failure: lease expired for worker ${job.worker_id ?? 'unknown'}`
       : `Worker failure: worker ${job.worker_id ?? 'unknown'} is offline or unresponsive`;
 
-    const result = await recoverJob(job.id, reason);
+    const result = await recoverJob(job.id, reason, { onlyIfStale: options });
     results.push(result);
   }
 
@@ -2053,11 +2118,11 @@ export async function evaluateAndPromoteDependentJobs(
 
       const jobMap = new Map<string, JobRecord>();
       for (const j of jobsInRun) {
-        if (j.job_key) {
-          jobMap.set(j.job_key, j);
-        }
         jobMap.set(j.name, j);
         jobMap.set(j.id, j);
+      }
+      for (const j of jobsInRun) {
+        if (j.job_key) jobMap.set(j.job_key, j);
       }
 
       let changed = true;
@@ -2485,7 +2550,3 @@ export async function getSystemStats(): Promise<SystemStats> {
     },
   };
 }
-
-
-
-

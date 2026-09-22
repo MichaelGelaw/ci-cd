@@ -9,7 +9,7 @@ def main():
     configure_logging(worker_id=worker.config.worker_id)
 
     def handle_signal(sig, frame):
-        worker.stop()
+        worker.request_stop()
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
