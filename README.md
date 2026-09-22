@@ -13,7 +13,7 @@ mini-ci is designed with strict separation between durable state, queue coordina
 |                                  mini-ci Architecture                            |
 +-----------------------------------------------------------------------------------+
 
-   Developers / GitHub Webhooks                   Web Dashboard (Next.js 14)
+   Developers / GitHub Webhooks                   Web Dashboard (Next.js 15)
               |                                               |
               v                                               v
    +--------------------+     HTTP REST API      +-------------------------+
@@ -56,7 +56,7 @@ mini-ci is designed with strict separation between durable state, queue coordina
 2. **Redis is for Coordination Only**: Redis manages reliable FIFO job dispatching (`LPUSH`, `BRPOPLPUSH`), real-time log publishing, and cancellation broadcast. If Redis is restarted or cleared, the scheduler reconciles disparities from PostgreSQL without duplicating state.
 3. **Optimistic Lease Fencing**: Workers acquire time-bounded leases with unique UUID tokens. Stale workers attempting to renew expired leases or write results are rejected with HTTP 409 `LEASE_CONFLICT` and aborted locally, eliminating split-brain races.
 4. **Distributed DAG Resolution**: Multi-job pipelines model dependencies via `needs` declarations. Root jobs queue immediately, while dependent jobs remain staged in `created` status until all prerequisite jobs succeed.
-5. **Workers are Untrusted**: Workers run in isolated Docker containers or sandboxed processes, stream logs line-by-line via Redis Pub/Sub, and enforce execution timeouts and artifact boundaries.
+5. **Execution Modes**: Workers run commands in Docker containers or trusted host-shell processes, stream logs line-by-line via Redis Pub/Sub, and enforce execution timeouts and artifact boundaries.
 
 ---
 
@@ -66,7 +66,7 @@ mini-ci is designed with strict separation between durable state, queue coordina
 mini-ci/
   apps/
     api/              Control plane REST API service (Fastify, TypeScript)
-    dashboard/        Web management console and log viewer (Next.js 14, Tailwind)
+    dashboard/        Web management console and log viewer (Next.js 15, CSS)
     runner/           Local CLI execution engine with DAG parsing (TypeScript)
     worker/           Autonomous distributed execution worker (Python 3.14)
   packages/
@@ -91,7 +91,7 @@ mini-ci/
 ## Prerequisites
 
 - **Linux / WSL 2 (Ubuntu 22.04+) / macOS**
-- **Node.js**: `v20.x` or `v24.x`
+- **Node.js**: `v20.19+`, `v22.12+`, or `v24.x`
 - **pnpm**: `v9.x` or `v12.x`
 - **Python**: `v3.10+` (recommended: `v3.14`)
 - **Docker & Docker Compose**: `v24+`
@@ -118,11 +118,7 @@ Verify that containers are healthy:
 pnpm install
 ```
 
-Migrations run automatically upon API server startup, or can be triggered via TypeScript:
-
-```bash
-pnpm --filter @mini-ci/db build
-```
+Migrations run automatically when the API starts or the local runner uses `--persist`.
 
 ### 3. Start the Control Plane API
 
@@ -148,7 +144,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # Start worker connected to local control plane and Redis
-python src/main.py
+python -m src.main
 ```
 
 Worker logs confirm registration with capabilities `shell`, `docker`, and `linux`:
@@ -164,6 +160,12 @@ pnpm --filter @mini-ci/dashboard dev
 ```
 
 Open `http://localhost:3001` in your browser to inspect workflow runs, worker nodes, active jobs, artifacts, and live streaming logs.
+
+When API authentication is enabled, enter the API key under **API access**. The key
+is stored for the current browser tab and sent in authorization headers, including
+for log streams and artifact downloads. Browser requests use the dashboard's same-origin
+`/api-proxy` route by default; set `API_INTERNAL_URL` for a remote control plane or
+`NEXT_PUBLIC_API_URL` to explicitly use a browser-accessible API URL.
 
 ---
 
@@ -181,12 +183,12 @@ pnpm dev:runner workflows/examples/hello.yml
 
 | Flag | Description |
 | :--- | :--- |
-| `--docker` | Force Docker container execution for all steps |
-| `--image <img\>` | Specify default Docker image (e.g. `node:20-alpine`, `python:3.12-slim`) |
-| `--persist` | Persist run metadata and step attempts into PostgreSQL |
-| `--concurrency <N\>` | Maximum concurrent jobs when running multi-job DAG workflows |
+| `--shell` | Force trusted host-shell execution even when images are configured |
+| `--persist` | Persist run and job metadata into PostgreSQL |
 | `--json` | Emit structured JSON execution results to stdout |
-| `--help` | Show CLI usage instructions |
+
+Images configured on a workflow, job, or step select Docker execution automatically.
+Host-shell execution inherits the runner's permissions; use it only for trusted workflows.
 
 ### Example Workflow Definitions
 
@@ -246,16 +248,19 @@ The Python worker daemon (`apps/worker`) is configured via environment variables
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `API_BASE_URL` | `http://localhost:3000` | HTTP URL of the mini-ci control plane |
-| `REDIS_URL` | `redis://localhost:6379/0` | Connection string for Redis coordination |
+| `API_URL` | `http://localhost:3000` | Control plane URL |
+| `MINI_CI_API_KEY` | unset | API token shared with the control plane (`API_KEY` is a worker fallback) |
+| `REDIS_URL` | `redis://localhost:6379` | Redis connection string |
 | `WORKER_ID` | `worker-<uuid>` | Unique worker identifier |
-| `WORKER_TAGS` | `docker,shell,linux` | Comma-separated capability tags for job matching |
-| `HEARTBEAT_INTERVAL_SECONDS` | `10` | Frequency of heartbeat pings sent to API |
-| `LEASE_RENEW_INTERVAL_SECONDS` | `10` | Frequency of lease renewal while executing jobs |
-| `LOG_BATCH_SIZE` | `20` | Maximum log lines buffered before Redis publish |
-| `LOG_FLUSH_INTERVAL_SECONDS` | `0.25` | Maximum log buffer age before forced flush |
-| `CONTAINER_MEMORY_LIMIT` | `512m` | Docker container memory ceiling |
-| `CONTAINER_CPU_LIMIT` | `1.0` | Docker container CPU allocation |
+| `WORKER_NAME` | hostname | Display name |
+| `WORKER_TAGS` | `docker,shell,<platform>` | Advertised capabilities |
+| `WORKER_QUEUE` | dedicated worker queue | Optional queue override |
+| `POLL_TIMEOUT_SECONDS` | `2` | Blocking queue poll timeout |
+| `HEARTBEAT_INTERVAL_SECONDS` | `5` | Heartbeat interval |
+| `LOG_TTL_SECONDS` | `86400` | Buffered log retention |
+
+Lease renewal runs every third of the granted lease duration. Docker limits default to
+512 MiB memory and one CPU. The host-shell mode does not provide a security sandbox.
 
 ---
 
@@ -268,26 +273,29 @@ All requests accept and return standard JSON. When `MINI_CI_API_KEY` is configur
 | Method | Path | Description | Response Codes |
 | :--- | :--- | :--- | :--- |
 | `POST` | `/workflows/runs` | Submit and trigger workflow YAML run | `201 Created`, `400 Bad Request` |
-| `GET` | `/workflows/runs` | List recent workflow runs (supports `?limit=` and `?status=`) | `200 OK` |
-| `GET` | `/workflows/runs/:id` | Get details, trigger metadata, and job list for run | `200 OK`, `404 Not Found` |
-| `POST` | `/workflows/runs/:id/cancel` | Cancel run and abort all in-progress jobs | `200 OK`, `400 Bad Request` |
+| `GET` | `/workflow-runs` | List recent workflow runs (supports `?limit=` and `?offset=`) | `200 OK` |
+| `GET` | `/workflow-runs/:id` | Get details, trigger metadata, and job list for run | `200 OK`, `404 Not Found` |
+| `POST` | `/workflow-runs/:id/cancel` | Cancel run and abort all in-progress jobs | `200 OK`, `400 Bad Request` |
+
+Leased job status reports must include both `worker_id` and the current `lease_token`.
+Expired or replaced leases receive HTTP 409. Sequential steps remain staged until their
+predecessor succeeds, and workflow submissions are committed atomically.
 
 ### Jobs & Execution
 
 | Method | Path | Description | Response Codes |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/jobs` | List jobs with optional filtering by `status`, `workflow_run_id` | `200 OK` |
 | `GET` | `/jobs/:id` | Get full job state, attempts history, and lease metadata | `200 OK`, `404 Not Found` |
-| `PATCH` | `/jobs/:id/status` | Update job state (`running`, `succeeded`, `failed`, etc.) | `200 OK`, `400 Bad Request`, `409 Conflict` |
-| `POST` | `/jobs/:id/lease` | Renew active execution lease token (prevents timeout) | `200 OK`, `409 Conflict (Fencing)` |
-| `GET` | `/jobs/:id/logs` | Fetch buffered execution logs (`?offset=` and `?limit=`) | `200 OK` |
+| `POST` | `/jobs/:id/status` | Update job state (`running`, `succeeded`, `failed`, etc.) | `200 OK`, `400 Bad Request`, `409 Conflict` |
+| `POST` | `/jobs/:id/lease/renew` | Renew active execution lease token (prevents timeout) | `200 OK`, `409 Conflict (Fencing)` |
+| `GET` | `/jobs/:id/logs` | Fetch execution logs (`?format=text` and `?stream=stdout|stderr`) | `200 OK` |
 | `GET` | `/jobs/:id/logs/stream` | Real-time Server-Sent Events (SSE) live log stream | `200 OK (text/event-stream)` |
 
 ### Workers & Scheduling
 
 | Method | Path | Description | Response Codes |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/workers/register` | Register new worker with capability tags and metadata | `201 Created` |
+| `POST` | `/workers/register` | Register new worker with capability tags and metadata | `200 OK` |
 | `GET` | `/workers` | List registered workers with health status (`ready`, `offline`) | `200 OK` |
 | `GET` | `/workers/:id` | Get individual worker information and active assignments | `200 OK`, `404 Not Found` |
 | `POST` | `/workers/:id/heartbeat`| Send heartbeat keeping worker marked `ready` | `200 OK` |
@@ -309,7 +317,7 @@ All requests accept and return standard JSON. When `MINI_CI_API_KEY` is configur
 | `POST` | `/repositories` | Connect Git repository with optional webhook secret | `201 Created` |
 | `GET` | `/repositories` | List connected repositories | `200 OK` |
 | `GET` | `/repositories/:id` | Get repository configuration | `200 OK`, `404 Not Found` |
-| `DELETE`| `/repositories/:id` | Delete repository configuration | `204 No Content` |
+| `DELETE`| `/repositories/:id` | Delete repository configuration | `200 OK` |
 | `POST` | `/repositories/:id/workflows` | Register workflow YAML file associated with repo | `201 Created` |
 | `GET` | `/repositories/:id/workflows` | List workflows registered for repository | `200 OK` |
 | `POST` | `/webhooks/github` | Receive GitHub webhook events (`push`, `pull_request`, `ping`) | `200 OK`, `400 Bad Request`, `401 Unauthorized` |
@@ -328,6 +336,9 @@ All requests accept and return standard JSON. When `MINI_CI_API_KEY` is configur
 ## GitHub Webhook Integration
 
 mini-ci integrates with GitHub webhooks using HMAC-SHA256 signature verification.
+When `MINI_CI_API_KEY` is set, webhook execution also requires a repository secret or
+`GITHUB_WEBHOOK_SECRET`. Webhooks execute registered workflows only; payloads cannot
+provide inline workflow commands. Pull request branch filters apply to the target branch.
 
 ### Setup Instructions
 
@@ -337,7 +348,7 @@ mini-ci integrates with GitHub webhooks using HMAC-SHA256 signature verification
      -H "Content-Type: application/json" \
      -d '{
        "name": "my-org/my-project",
-       "clone_url": "https://github.com/my-org/my-project.git",
+       "url": "https://github.com/my-org/my-project.git",
        "default_branch": "main",
        "webhook_secret": "my-super-secret-token"
      }'
@@ -377,10 +388,10 @@ mini-ci features an exhaustive test suite covering unit, integration, failure in
 # Run all automated tests across TypeScript and Python
 pnpm test:all
 
-# Run TypeScript Vitest suite (16 suites, 165+ tests)
+# Run TypeScript Vitest suites
 pnpm test
 
-# Run Python worker Pytest suite (14 modules, 47 tests)
+# Run Python worker Pytest suites
 pnpm test:worker
 
 # Verify strict TypeScript type compliance (zero errors)
