@@ -35,7 +35,7 @@ export const artifactRoutes: FastifyPluginAsync = async (app) => {
           name: artifactName,
           path: logicalPath,
           mimeType: part.mimetype,
-          content: part.file,
+          content: await part.toBuffer(),
         });
 
         return reply.status(201).send({ artifact });
@@ -54,7 +54,9 @@ export const artifactRoutes: FastifyPluginAsync = async (app) => {
       } else if (typeof request.body === 'string') {
         contentSource = Buffer.from(request.body, 'utf-8');
       } else {
-        contentSource = request.raw;
+        return reply.status(400).send({
+          error: { message: 'Use multipart or an octet-stream body to upload artifacts', code: 'INVALID_REQUEST' },
+        });
       }
 
       const artifact = await uploadArtifactService({
@@ -67,6 +69,9 @@ export const artifactRoutes: FastifyPluginAsync = async (app) => {
 
       return reply.status(201).send({ artifact });
     } catch (err) {
+      if (err instanceof Error && 'statusCode' in err && err.statusCode === 413) {
+        return reply.status(413).send({ error: { message: err.message, code: 'ARTIFACT_TOO_LARGE' } });
+      }
       const message = (err as Error).message;
       if (message.includes('not found')) {
         return reply.status(404).send({
@@ -169,7 +174,11 @@ export const artifactRoutes: FastifyPluginAsync = async (app) => {
       }
 
       reply.header('Content-Type', result.artifact.mime_type || 'application/octet-stream');
-      reply.header('Content-Disposition', `attachment; filename="${result.artifact.name}"`);
+      const filename = encodeURIComponent(result.artifact.name).replace(/['()*]/g, (char) =>
+        `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+      );
+      reply.header('Content-Disposition', `attachment; filename*=UTF-8''${filename}`);
+      reply.header('X-Content-Type-Options', 'nosniff');
       reply.header('Content-Length', result.artifact.size_bytes);
 
       return reply.send(result.stream);

@@ -31,9 +31,10 @@ class ApiClient:
         if headers:
             kwargs["headers"] = headers
         resp = requests.get(f"{self.base_url}/jobs/{job_id}", **kwargs)
-        if resp.status_code == 200:
-            return resp.json().get("job")
-        return None
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json().get("job")
 
     def update_job_status(
         self,
@@ -45,6 +46,7 @@ class ApiClient:
         stderr: Optional[str] = None,
         error: Optional[str] = None,
         duration_ms: Optional[int] = None,
+        lease_token: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"status": status}
         if worker_id is not None:
@@ -59,6 +61,8 @@ class ApiClient:
             payload["error"] = error
         if duration_ms is not None:
             payload["duration_ms"] = duration_ms
+        if lease_token is not None:
+            payload["lease_token"] = lease_token
 
         headers = self._get_headers()
         kwargs: Dict[str, Any] = {"json": payload, "timeout": 10}
@@ -162,16 +166,13 @@ class ApiClient:
         filename = name or os.path.basename(file_path)
         relpath = logical_path or filename
 
-        extra_headers = {
-            "x-artifact-name": filename,
-            "x-artifact-path": relpath,
-        }
-        if mime_type:
-            extra_headers["Content-Type"] = mime_type
-
-        headers = self._get_headers(extra_headers)
-
         with open(file_path, "rb") as f:
-            resp = requests.post(url, data=f, headers=headers, timeout=60)
+            resp = requests.post(
+                url,
+                data={"name": filename, "path": relpath},
+                files={"file": (filename, f, mime_type or "application/octet-stream")},
+                headers=self._get_headers(),
+                timeout=60,
+            )
             resp.raise_for_status()
             return resp.json()

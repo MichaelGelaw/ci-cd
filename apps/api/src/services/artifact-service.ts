@@ -37,16 +37,21 @@ export async function uploadArtifactService(
     options.content,
   );
 
-  return createArtifact({
-    jobId: job.id,
-    workflowRunId: job.workflow_run_id,
-    name: filename,
-    path: logicalPath,
-    sizeBytes: saveResult.sizeBytes,
-    mimeType: options.mimeType ?? null,
-    storagePath: saveResult.storagePath,
-    checksum: saveResult.checksum,
-  });
+  try {
+    return await createArtifact({
+      jobId: job.id,
+      workflowRunId: job.workflow_run_id,
+      name: filename,
+      path: logicalPath,
+      sizeBytes: saveResult.sizeBytes,
+      mimeType: options.mimeType ?? null,
+      storagePath: saveResult.storagePath,
+      checksum: saveResult.checksum,
+    });
+  } catch (error) {
+    await storage.deleteArtifactFile(saveResult.storagePath);
+    throw error;
+  }
 }
 
 export async function getJobArtifactsService(jobId: string): Promise<ArtifactRecord[]> {
