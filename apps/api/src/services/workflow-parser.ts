@@ -11,12 +11,30 @@ import type {
   EventTriggerFilter,
 } from '@mini-ci/types';
 
+function parseEnvironment(raw: object): Record<string, string> {
+  const env: Record<string, string> = Object.create(null);
+  for (const [key, value] of Object.entries(raw)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new Error(`Invalid environment variable name "${key}"`);
+    }
+    if (typeof value !== 'string' && typeof value !== 'boolean' &&
+        !(typeof value === 'number' && Number.isFinite(value))) {
+      throw new Error(`Environment variable "${key}" must have a scalar value`);
+    }
+    if (String(value).includes('\0')) {
+      throw new Error(`Environment variable "${key}" must not contain a null byte`);
+    }
+    env[key] = String(value);
+  }
+  return env;
+}
+
 export function parseStep(
   step: unknown,
   i: number,
   contextPrefix: string = 'Step',
 ): StepDefinition {
-  if (step === null || typeof step !== 'object') {
+  if (step === null || typeof step !== 'object' || Array.isArray(step)) {
     throw new Error(`${contextPrefix} ${i + 1} must be a YAML mapping`);
   }
 
@@ -43,7 +61,7 @@ export function parseStep(
   }
 
   if (s['timeout_seconds'] !== undefined) {
-    if (typeof s['timeout_seconds'] !== 'number' || s['timeout_seconds'] <= 0) {
+    if (typeof s['timeout_seconds'] !== 'number' || !Number.isFinite(s['timeout_seconds']) || s['timeout_seconds'] <= 0) {
       throw new Error(`${contextPrefix} ${i + 1} "timeout_seconds" must be a positive number`);
     }
     def.timeout_seconds = s['timeout_seconds'];
@@ -81,19 +99,19 @@ function parseRetryPolicy(retry: unknown, prefix: string): RetryPolicy {
     policy.max_attempts = r['max_attempts'];
   }
   if (r['base_delay_seconds'] !== undefined) {
-    if (typeof r['base_delay_seconds'] !== 'number' || r['base_delay_seconds'] <= 0) {
+    if (typeof r['base_delay_seconds'] !== 'number' || !Number.isFinite(r['base_delay_seconds']) || r['base_delay_seconds'] <= 0) {
       throw new Error(`${prefix} retry "base_delay_seconds" must be a positive number`);
     }
     policy.base_delay_seconds = r['base_delay_seconds'];
   }
   if (r['max_delay_seconds'] !== undefined) {
-    if (typeof r['max_delay_seconds'] !== 'number' || r['max_delay_seconds'] <= 0) {
+    if (typeof r['max_delay_seconds'] !== 'number' || !Number.isFinite(r['max_delay_seconds']) || r['max_delay_seconds'] <= 0) {
       throw new Error(`${prefix} retry "max_delay_seconds" must be a positive number`);
     }
     policy.max_delay_seconds = r['max_delay_seconds'];
   }
   if (r['backoff_factor'] !== undefined) {
-    if (typeof r['backoff_factor'] !== 'number' || r['backoff_factor'] < 1) {
+    if (typeof r['backoff_factor'] !== 'number' || !Number.isFinite(r['backoff_factor']) || r['backoff_factor'] < 1) {
       throw new Error(`${prefix} retry "backoff_factor" must be a number >= 1`);
     }
     policy.backoff_factor = r['backoff_factor'];
@@ -148,7 +166,7 @@ function parseArtifacts(artifacts: unknown, prefix: string): string[] | Artifact
       config.paths = a['paths'].map((p) => String(p));
     }
     if (a['retention_days'] !== undefined) {
-      if (typeof a['retention_days'] !== 'number' || a['retention_days'] <= 0) {
+      if (typeof a['retention_days'] !== 'number' || !Number.isFinite(a['retention_days']) || a['retention_days'] <= 0) {
         throw new Error(`${prefix} artifact "retention_days" must be a positive number`);
       }
       config.retention_days = a['retention_days'];
@@ -206,7 +224,7 @@ export function parseJob(
   }
 
   if (j['timeout_seconds'] !== undefined) {
-    if (typeof j['timeout_seconds'] !== 'number' || j['timeout_seconds'] <= 0) {
+    if (typeof j['timeout_seconds'] !== 'number' || !Number.isFinite(j['timeout_seconds']) || j['timeout_seconds'] <= 0) {
       throw new Error(`Job "${key}" "timeout_seconds" must be a positive number`);
     }
     job.timeout_seconds = j['timeout_seconds'];
@@ -245,7 +263,7 @@ export function parseJob(
     if (typeof j['env'] !== 'object' || j['env'] === null || Array.isArray(j['env'])) {
       throw new Error(`Job "${key}" "env" must be a mapping`);
     }
-    job.env = j['env'] as Record<string, string>;
+    job.env = parseEnvironment(j['env']);
   }
 
   if (Array.isArray(j['steps'])) {
@@ -289,13 +307,13 @@ export function validateJobDependencies(jobs: Record<string, JobDefinition>): st
       if (dep === key) {
         throw new Error(`Job "${key}" cannot depend on itself`);
       }
-      if (!jobs[dep]) {
+      if (!Object.hasOwn(jobs, dep)) {
         throw new Error(`Job "${key}" depends on unknown job "${dep}"`);
       }
     }
   }
 
-  const visited: Record<string, number> = {};
+  const visited: Record<string, number> = Object.create(null);
   const order: string[] = [];
   const currentPath: string[] = [];
 
@@ -338,7 +356,7 @@ export function validateJobDependencies(jobs: Record<string, JobDefinition>): st
 export function normalizeWorkflow(workflow: WorkflowDefinition): NormalizedWorkflowDefinition {
   if (workflow.jobs && Object.keys(workflow.jobs).length > 0) {
     const topologicalOrder = validateJobDependencies(workflow.jobs);
-    const normalizedJobs: Record<string, NormalizedJobDefinition> = {};
+    const normalizedJobs: Record<string, NormalizedJobDefinition> = Object.create(null);
 
     for (const key of Object.keys(workflow.jobs)) {
       const job = workflow.jobs[key]!;
@@ -425,7 +443,7 @@ export function parseWorkflowContent(content: string): WorkflowDefinition {
     if (typeof obj['env'] !== 'object' || obj['env'] === null || Array.isArray(obj['env'])) {
       throw new Error('Workflow "env" must be a mapping');
     }
-    workflow.env = obj['env'] as Record<string, string>;
+    workflow.env = parseEnvironment(obj['env']);
   }
 
   if (obj['on'] !== undefined) {
@@ -449,7 +467,7 @@ export function parseWorkflowContent(content: string): WorkflowDefinition {
       throw new Error('Workflow "jobs" mapping must not be empty');
     }
 
-    const jobs: Record<string, JobDefinition> = {};
+    const jobs: Record<string, JobDefinition> = Object.create(null);
     for (const key of jobKeys) {
       jobs[key] = parseJob(key, rawJobs[key], workflow.image);
     }
@@ -492,7 +510,7 @@ export function parseWorkflowTrigger(raw: unknown): WorkflowTriggerConfig {
   }
 
   if (typeof raw === 'object' && raw !== null) {
-    const config: Record<string, EventTriggerFilter | null> = {};
+    const config: Record<string, EventTriggerFilter | null> = Object.create(null);
     for (const [event, val] of Object.entries(raw as Record<string, unknown>)) {
       if (val === null || val === undefined) {
         config[event] = null;
@@ -537,8 +555,7 @@ export function matchPattern(pattern: string, target: string): boolean {
       '^' +
       pattern
         .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-        .replace(/\*\*/g, '.*')
-        .replace(/\*/g, '[^/]*') +
+        .replace(/\*\*|\*/g, (wildcard) => wildcard === '**' ? '.*' : '[^/]*') +
       '$';
     const regex = new RegExp(regexStr);
     return regex.test(target);
@@ -568,7 +585,7 @@ export function shouldTriggerWorkflow(
     const eventConfig = (workflow.on as Record<string, EventTriggerFilter | null | undefined>)[
       event
     ];
-    if (eventConfig === undefined) {
+    if (!Object.hasOwn(workflow.on, event) || eventConfig === undefined) {
       return false;
     }
 

@@ -16,6 +16,7 @@ import {
   createJob,
   updateJobStatus,
   calculateRetryDelay,
+  requeueJobForRetry,
 } from '@mini-ci/db';
 import { runStepInDocker } from './docker-runner.js';
 import { normalizeWorkflow } from './parser.js';
@@ -53,6 +54,7 @@ function runStepShell(
   timeoutMs: number | undefined,
   shell: string | boolean,
   signal?: AbortSignal,
+  env?: Record<string, string>,
 ): Promise<StepOutput> {
   return new Promise((resolve) => {
     let stdout = '';
@@ -75,6 +77,7 @@ function runStepShell(
       shell,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
+      env: { ...process.env, ...env },
     });
 
     child.stdout.on('data', (chunk: Buffer) => {
@@ -148,7 +151,9 @@ async function executeMultiJobWorkflow(
   workflow: WorkflowDefinition,
   options: ExecuteOptions = {},
 ): Promise<WorkflowResult> {
-  const mode = options.mode ?? (workflow.image ? 'docker' : 'shell');
+  const mode = options.mode ?? (workflow.image || workflow.steps?.some((step) => step.image) ||
+    Object.values(workflow.jobs ?? {}).some((job) => job.image || job.steps?.some((step) => step.image))
+    ? 'docker' : 'shell');
   const workflowStart = new Date();
   const results: StepResult[] = [];
   let failed = false;
@@ -333,14 +338,18 @@ async function executeMultiJobWorkflow(
             ? (step.timeout_seconds ?? job.timeout_seconds)! * 1000
             : undefined;
 
-          if (dbJobId && attempt === 1 && si === 0) {
+          if (dbJobId && (attempt > 1 || si === 0)) {
             try {
+              if (attempt > 1) {
+                await requeueJobForRetry(dbJobId);
+                await updateJobStatus(dbJobId, 'assigned');
+              }
               await updateJobStatus(dbJobId, 'running', { startedAt: stepStart });
             } catch {}
           }
 
-          if (mode === 'docker') {
-            const image = step.image ?? job.image ?? workflow.image;
+          const image = step.image ?? job.image ?? workflow.image;
+          if (options.mode === 'docker' || (options.mode !== 'shell' && image)) {
             if (!image) {
               result = {
                 exit_code: null,
@@ -355,6 +364,7 @@ async function executeMultiJobWorkflow(
                 workspaceDir!,
                 timeoutMs,
                 options.signal,
+                job.env,
               );
             }
           } else {
@@ -363,6 +373,7 @@ async function executeMultiJobWorkflow(
               timeoutMs,
               options.shell ?? true,
               options.signal,
+              job.env,
             );
           }
 
@@ -379,7 +390,8 @@ async function executeMultiJobWorkflow(
             status = 'failed';
           }
 
-          if (status === 'success' || status === 'cancelled') {
+          if (status === 'success' || status === 'cancelled' ||
+              (result.error?.startsWith('Step timed out') && retryPolicy?.retry_on_timeout === false)) {
             break;
           }
 
@@ -483,7 +495,9 @@ export async function executeWorkflow(
     return executeMultiJobWorkflow(workflow, options);
   }
 
-  const mode = options.mode ?? (workflow.image ? 'docker' : 'shell');
+  const mode = options.mode ?? (workflow.image || workflow.steps?.some((step) => step.image) ||
+    Object.values(workflow.jobs ?? {}).some((job) => job.image || job.steps?.some((step) => step.image))
+    ? 'docker' : 'shell');
   const steps = workflow.steps ?? [];
   const workflowStart = new Date();
   const results: StepResult[] = [];
@@ -615,9 +629,8 @@ export async function executeWorkflow(
           await updateJobStatus(dbJobId, 'running', { startedAt: stepStart });
         }
 
-        if (mode === 'docker') {
-          // Step-level image overrides workflow-level image.
-          const image = step.image ?? workflow.image;
+        const image = step.image ?? workflow.image;
+        if (options.mode === 'docker' || (options.mode !== 'shell' && image)) {
           if (!image) {
             result = {
               exit_code: null,
@@ -626,10 +639,10 @@ export async function executeWorkflow(
               error: 'No Docker image specified for step or workflow',
             };
           } else {
-            result = await runStepInDocker(image, step.run, workspaceDir!, timeoutMs, options.signal);
+            result = await runStepInDocker(image, step.run, workspaceDir!, timeoutMs, options.signal, workflow.env);
           }
         } else {
-          result = await runStepShell(step.run, timeoutMs, options.shell ?? true, options.signal);
+          result = await runStepShell(step.run, timeoutMs, options.shell ?? true, options.signal, workflow.env);
         }
 
         stepEnd = new Date();
@@ -645,7 +658,8 @@ export async function executeWorkflow(
           status = 'failed';
         }
 
-        if (status === 'success' || status === 'cancelled') {
+        if (status === 'success' || status === 'cancelled' ||
+              (result.error?.startsWith('Step timed out') && retryPolicy?.retry_on_timeout === false)) {
           break;
         }
 
@@ -657,7 +671,7 @@ export async function executeWorkflow(
             error: result.error ?? null,
           });
           await updateJobStatus(dbJobId, 'retrying');
-          await updateJobStatus(dbJobId, 'queued');
+          await requeueJobForRetry(dbJobId);
           await updateJobStatus(dbJobId, 'assigned');
         }
       }

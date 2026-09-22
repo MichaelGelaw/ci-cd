@@ -38,6 +38,7 @@ export async function runStepInDocker(
   workspaceDir: string,
   timeoutMs: number | undefined,
   signal?: AbortSignal,
+  env?: Record<string, string>,
 ): Promise<DockerStepResult> {
   let container: Docker.Container | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -47,7 +48,11 @@ export async function runStepInDocker(
     try {
       await container?.kill();
     } catch {
-      // Container may have already stopped.
+      try {
+        await container?.stop({ t: 1 });
+      } catch {
+        // Container may have already stopped.
+      }
     }
   };
 
@@ -71,6 +76,7 @@ export async function runStepInDocker(
       Image: image,
       Cmd: ['sh', '-c', command],
       WorkingDir: '/workspace',
+      Env: env ? Object.entries(env).map(([key, value]) => `${key}=${value}`) : undefined,
       HostConfig: {
         Binds: [`${workspaceDir}:/workspace`],
         Memory: 512 * 1024 * 1024,
