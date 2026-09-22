@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { ApiAccess } from './api-access';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -79,6 +80,7 @@ export default function RootLayout({
 
           <div className="main-content">
             <header className="top-bar">
+              <ApiAccess />
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                 <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>Engine Status:</span>
                 <span className="badge badge-ready">Connected</span>

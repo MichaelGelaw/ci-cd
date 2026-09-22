@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import type { ArtifactRecord } from '@mini-ci/types';
-import { listArtifacts, getArtifactDownloadUrl } from '../../lib/api';
+import { listArtifacts, downloadArtifact } from '../../lib/api';
 
 export default function ArtifactsPage() {
   const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
@@ -106,7 +106,12 @@ export default function ArtifactsPage() {
                     </td>
                     <td>
                       <a
-                        href={getArtifactDownloadUrl(a.id)}
+                        href="#"
+                        onClick={async (event) => {
+                          event.preventDefault();
+                          try { await downloadArtifact(a.id, a.name); }
+                          catch (error) { alert((error as Error).message); }
+                        }}
                         className="btn btn-secondary btn-sm"
                         download
                       >

@@ -3,17 +3,14 @@
 import { useEffect, useState, use } from 'react';
 import Link from 'next/link';
 import type { WorkflowRunRecord, JobRecord, ArtifactRecord } from '@mini-ci/types';
-import { getWorkflowRun, cancelWorkflowRun, getRunArtifacts, getArtifactDownloadUrl } from '../../../lib/api';
+import { getWorkflowRun, cancelWorkflowRun, getRunArtifacts, downloadArtifact } from '../../../lib/api';
 
 export default function WorkflowRunDetailPage({
   params,
 }: {
-  params: { id: string } | Promise<{ id: string }>;
+  params: Promise<{ id: string }>;
 }) {
-  const resolvedParams =
-    params instanceof Promise || typeof (params as unknown as { then?: unknown })?.then === 'function'
-      ? use(params as Promise<{ id: string }>)
-      : params;
+  const resolvedParams = use(params);
   const runId = resolvedParams.id;
 
   const [run, setRun] = useState<WorkflowRunRecord | null>(null);
@@ -293,7 +290,12 @@ export default function WorkflowRunDetailPage({
                     </td>
                     <td>
                       <a
-                        href={getArtifactDownloadUrl(a.id)}
+                        href="#"
+                        onClick={async (event) => {
+                          event.preventDefault();
+                          try { await downloadArtifact(a.id, a.name); }
+                          catch (error) { alert((error as Error).message); }
+                        }}
                         className="btn btn-secondary btn-sm"
                         download
                       >

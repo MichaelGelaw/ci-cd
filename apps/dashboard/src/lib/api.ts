@@ -13,8 +13,13 @@ import type {
 
 export const API_BASE =
   typeof window !== 'undefined'
-    ? process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:3000'
+    ? process.env.NEXT_PUBLIC_API_URL || '/api-proxy'
     : process.env.API_INTERNAL_URL || 'http://127.0.0.1:3000';
+
+function authorizationHeaders(): Record<string, string> {
+  const key = typeof window !== 'undefined' ? window.sessionStorage.getItem('mini-ci-api-key') : null;
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${API_BASE}${path}`;
@@ -22,6 +27,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     ...options,
     headers: {
       'Content-Type': 'application/json',
+      ...authorizationHeaders(),
       ...options?.headers,
     },
     cache: 'no-store',
@@ -167,6 +173,17 @@ export function getArtifactDownloadUrl(id: string): string {
   return `${API_BASE}/artifacts/${id}/download`;
 }
 
+export async function downloadArtifact(id: string, name: string): Promise<void> {
+  const response = await fetch(getArtifactDownloadUrl(id), { headers: authorizationHeaders() });
+  if (!response.ok) throw new Error(`Artifact download failed (HTTP ${response.status})`);
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 export function subscribeJobLogs(
   jobId: string,
   onChunk: (chunk: LogChunk) => void,
@@ -177,27 +194,44 @@ export function subscribeJobLogs(
     return () => {};
   }
 
-  const eventSource = new EventSource(`${API_BASE}/jobs/${jobId}/logs/stream`);
-
-  eventSource.onmessage = (event) => {
+  const controller = new AbortController();
+  async function readLogs(): Promise<void> {
     try {
-      const data = JSON.parse(event.data);
-      if (data.event === 'end') {
-        onEnd(data as LogEndEvent);
-      } else if (data.data !== undefined) {
-        onChunk(data as LogChunk);
+      const response = await fetch(`${API_BASE}/jobs/${jobId}/logs/stream`, {
+        headers: authorizationHeaders(), signal: controller.signal,
+      });
+      if (!response.ok || !response.body) throw new Error('Log stream unavailable');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      try {
+        while (!controller.signal.aborted) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let boundary: number;
+          while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+            const frame = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            const payload = frame.split('\n').filter((line) => line.startsWith('data:'))
+              .map((line) => line.slice(5).trimStart()).join('\n');
+            if (!payload) continue;
+            const data = JSON.parse(payload) as LogEvent;
+            if ('event' in data && data.event === 'end') {
+              onEnd(data);
+              return;
+            }
+            if ('stream' in data) onChunk(data);
+          }
+        }
+      } finally {
+        await reader.cancel();
+        reader.releaseLock();
       }
     } catch {
-      // Ignore unparseable frames
+      if (!controller.signal.aborted) onError?.(new Event('error'));
     }
-  };
-
-  eventSource.onerror = (err) => {
-    if (onError) onError(err);
-    eventSource.close();
-  };
-
-  return () => {
-    eventSource.close();
-  };
+  }
+  void readLogs();
+  return () => controller.abort();
 }
