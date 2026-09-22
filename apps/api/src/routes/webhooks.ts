@@ -16,7 +16,7 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
       });
     }
 
-    const rawBody = (request as any).rawBody ?? JSON.stringify(request.body ?? {});
+    const rawBody = request.rawBody ?? JSON.stringify(request.body ?? {});
     const payload = (request.body ?? {}) as Record<string, unknown>;
 
     try {

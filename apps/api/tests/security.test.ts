@@ -1,17 +1,16 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { runMigrations, closePool } from '@mini-ci/db';
+import { closeRedis } from '@mini-ci/queue';
 import { buildServer } from '../src/server.js';
 import type { FastifyInstance } from 'fastify';
 
 describe('Milestone 23: Security Hardening (Authentication & Rate Limiting)', () => {
   let app: FastifyInstance;
-  const originalApiKey = process.env.MINI_CI_API_KEY;
-  const originalRateMax = process.env.RATE_LIMIT_MAX;
-  const originalRateWindow = process.env.RATE_LIMIT_WINDOW_MS;
+  beforeAll(async () => { await runMigrations(); });
+  afterAll(async () => { await closePool(); await closeRedis(); });
 
   afterEach(async () => {
-    process.env.MINI_CI_API_KEY = originalApiKey;
-    process.env.RATE_LIMIT_MAX = originalRateMax;
-    process.env.RATE_LIMIT_WINDOW_MS = originalRateWindow;
+    vi.unstubAllEnvs();
     if (app) {
       await app.close();
     }
@@ -19,7 +18,7 @@ describe('Milestone 23: Security Hardening (Authentication & Rate Limiting)', ()
 
   describe('Permissive Authentication Mode (Default)', () => {
     beforeEach(async () => {
-      delete process.env.MINI_CI_API_KEY;
+      vi.stubEnv('MINI_CI_API_KEY', '');
       app = buildServer();
       await app.ready();
     });
@@ -39,13 +38,34 @@ describe('Milestone 23: Security Hardening (Authentication & Rate Limiting)', ()
       });
       expect(res.statusCode).toBe(200);
     });
+
+    it('does not execute workflow commands supplied by webhook payloads', async () => {
+      const res = await app.inject({
+        method: 'POST', url: '/webhooks/github',
+        headers: { 'x-github-event': 'push' },
+        payload: {
+          repository: { full_name: 'unregistered/inline-command' },
+          workflow: 'name: injected\nsteps:\n  - run: echo injected',
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().triggered).toBe(0);
+    });
+
+    it('returns a client error for malformed JSON', async () => {
+      const res = await app.inject({
+        method: 'POST', url: '/workflows/runs',
+        headers: { 'content-type': 'application/json' }, payload: '{',
+      });
+      expect(res.statusCode).toBe(400);
+    });
   });
 
   describe('Enforced Authentication Mode (MINI_CI_API_KEY set)', () => {
     const TEST_API_KEY = 'secret-test-token-12345';
 
     beforeEach(async () => {
-      process.env.MINI_CI_API_KEY = TEST_API_KEY;
+      vi.stubEnv('MINI_CI_API_KEY', TEST_API_KEY);
       app = buildServer();
       await app.ready();
     });
@@ -58,6 +78,15 @@ describe('Milestone 23: Security Hardening (Authentication & Rate Limiting)', ()
       expect(res.statusCode).toBe(401);
       const body = res.json();
       expect(body.error.code).toBe('UNAUTHORIZED');
+    });
+
+    it('rejects unsigned webhook triggers when API authentication is enabled', async () => {
+      const res = await app.inject({
+        method: 'POST', url: '/webhooks/github',
+        headers: { 'x-github-event': 'push' },
+        payload: { repository: { full_name: 'unregistered/unsigned' } },
+      });
+      expect(res.statusCode).toBe(401);
     });
 
     it('rejects requests with invalid API key with 401', async () => {
@@ -112,9 +141,9 @@ describe('Milestone 23: Security Hardening (Authentication & Rate Limiting)', ()
 
   describe('Rate Limiting', () => {
     beforeEach(async () => {
-      delete process.env.MINI_CI_API_KEY;
-      process.env.RATE_LIMIT_MAX = '5';
-      process.env.RATE_LIMIT_WINDOW_MS = '5000';
+      vi.stubEnv('MINI_CI_API_KEY', '');
+      vi.stubEnv('RATE_LIMIT_MAX', '5');
+      vi.stubEnv('RATE_LIMIT_WINDOW_MS', '5000');
       app = buildServer();
       await app.ready();
     });

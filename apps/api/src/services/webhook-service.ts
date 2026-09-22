@@ -4,7 +4,6 @@ import type {
   GitHubPushPayload,
   GitHubPullRequestPayload,
   GitHubPingPayload,
-  RegisteredWorkflowRecord,
 } from '@mini-ci/types';
 import { getRepositoryByName, listRegisteredWorkflows } from '@mini-ci/db';
 import { shouldTriggerWorkflow, parseWorkflowContent } from './workflow-parser.js';
@@ -86,6 +85,10 @@ export async function processGitHubWebhook(options: {
   const expectedSecret =
     secretOverride ?? repo?.webhook_secret ?? process.env['GITHUB_WEBHOOK_SECRET'] ?? undefined;
 
+  if (!expectedSecret && process.env['MINI_CI_API_KEY']?.trim()) {
+    throw new InvalidSignatureError('A webhook secret is required when API authentication is enabled');
+  }
+
   if (expectedSecret) {
     const isValid = verifyGitHubSignature(rawBody, signature, expectedSecret);
     if (!isValid) {
@@ -137,7 +140,7 @@ export async function processGitHubWebhook(options: {
     }
 
     ref = pr.pull_request?.head?.ref;
-    branch = ref;
+    branch = pr.pull_request?.base?.ref;
     commitSha = pr.pull_request?.head?.sha;
     commitMessage = pr.pull_request?.title;
     sender = pr.sender?.login;
@@ -152,28 +155,12 @@ export async function processGitHubWebhook(options: {
     };
   }
 
-  // Find candidate workflows: registered in DB or inline in payload
+  // Only registered workflows may be triggered by external webhook payloads.
   let registeredWorkflows: Array<{ name: string; content: string }> = [];
 
   if (repo) {
     const activeWfs = await listRegisteredWorkflows(repo.id, true);
     registeredWorkflows = activeWfs.map((w) => ({ name: w.name, content: w.content }));
-  }
-
-  // Also support inline workflows passed in payload (e.g. for testing)
-  if (Array.isArray(payload['workflows'])) {
-    for (const w of payload['workflows']) {
-      if (typeof w === 'string') {
-        registeredWorkflows.push({ name: 'inline-workflow', content: w });
-      } else if (typeof w === 'object' && w !== null && typeof (w as any).yaml === 'string') {
-        registeredWorkflows.push({
-          name: (w as any).name ?? 'inline-workflow',
-          content: (w as any).yaml,
-        });
-      }
-    }
-  } else if (typeof payload['workflow'] === 'string') {
-    registeredWorkflows.push({ name: 'inline-workflow', content: payload['workflow'] });
   }
 
   if (registeredWorkflows.length === 0) {

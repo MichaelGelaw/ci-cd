@@ -14,6 +14,13 @@ import { statsRoutes } from './routes/stats.js';
 import { metricsRoutes } from './routes/metrics.js';
 import { recordHttpRequest } from './metrics.js';
 
+declare module 'fastify' {
+  interface FastifyRequest {
+    startTime?: [number, number];
+    rawBody?: string | Buffer;
+  }
+}
+
 export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
   const app = fastify({
     requestIdHeader: 'x-request-id',
@@ -29,12 +36,12 @@ export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
 
   // Enable CORS for dashboard and browser clients
   app.addHook('onRequest', async (req, reply) => {
-    (req as any).startTime = process.hrtime();
+    req.startTime = process.hrtime();
     reply.header('Access-Control-Allow-Origin', '*');
     reply.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     reply.header(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, X-Hub-Signature-256, X-GitHub-Event, X-Artifact-Name, X-Artifact-Path, X-Request-Id',
+      'Content-Type, Authorization, X-Api-Key, X-Hub-Signature-256, X-GitHub-Event, X-Artifact-Name, X-Artifact-Path, X-Request-Id',
     );
     reply.header('Access-Control-Expose-Headers', 'X-Request-Id');
     if (req.method === 'OPTIONS') {
@@ -142,11 +149,11 @@ export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
 
   // Record Prometheus HTTP metrics
   app.addHook('onResponse', async (request, reply) => {
-    const startTime = (request as any).startTime;
+    const startTime = request.startTime;
     if (startTime) {
       const diff = process.hrtime(startTime);
       const durationSeconds = diff[0] + diff[1] / 1e9;
-      const route = request.routeOptions?.url || request.url.split('?')[0] || request.url;
+      const route = request.routeOptions?.url || '/unmatched';
       recordHttpRequest(request.method, route, reply.statusCode, durationSeconds);
     }
   });
@@ -164,15 +171,15 @@ export function buildServer(opts: FastifyServerOptions = {}): FastifyInstance {
     { parseAs: 'string' },
     (req, body, done) => {
       try {
-        (req as any).rawBody = body;
+        req.rawBody = body;
         if (!body || (body as string).trim() === '') {
           done(null, {});
           return;
         }
         const json = JSON.parse(body as string);
         done(null, json);
-      } catch (err) {
-        done(err as Error, undefined);
+      } catch (error) {
+        done(Object.assign(error as Error, { statusCode: 400 }), undefined);
       }
     },
   );
